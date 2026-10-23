@@ -449,7 +449,6 @@ class LerobotAgilexDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
-            episodes=self.episodes,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -543,7 +542,6 @@ class LerobotARXDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
-            episodes=self.episodes,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -1177,15 +1175,20 @@ _CONFIGS = [
         name="pi05_flatten_fold_normal",
         model=pi0_config.Pi0Config(pi05=True),
         data = LerobotAgilexDataConfig(
-            repo_id="<path_to_repo_root>/data/FlattenFold/base",
+            repo_id="/home/kian/kai0/data/FlattenFold/base",
             default_prompt="Flatten and fold the cloth.",
             use_delta_joint_actions=False,
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("<path/to/pi05_base/checkpoint>"),
-        num_train_steps=100_000,
-        keep_period=5000,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/kian/kai0/checkpoints/Task_A/mixed_1/params"
+        ),
+        num_train_steps=80_000,
+        # Save every 2000 steps as temporary; permanently keep only steps % 20000 == 0
+        save_interval=5000,
+        keep_period=20_000,
         num_workers=8,
-        batch_size=256,
+        batch_size=128,  # 4x A100: use GPUs 4-7; raise to 256 if using 8 GPUs
+        wandb_enabled=False,
     ),
     TrainConfig(
         name="pi05_tee_shirt_sort_normal",
