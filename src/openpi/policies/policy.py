@@ -81,21 +81,21 @@ class Policy(BasePolicy):
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
 
-        # TODO: For RTC passthrough: allow client to provide delay/prev chunk/horizon for realtime_action-capable models
-        if "prev_action_chunk" in obs:
-            sample_kwargs["prev_action_chunk"] = obs["prev_action_chunk"]
+        # RTC passthrough: client may send delay / prev chunk / horizon for Pi0RTC.
+        # Do NOT forward enable_rtc / mask_prefix_delay / prefix_attention_schedule into the
+        # jitted sample_actions — those are Python bools/strs and cause TracerBoolConversionError.
+        # Gate RTC in Python: omit prev_action_chunk when enable_rtc is false.
+        enable_rtc = bool(obs.get("enable_rtc", True))
+        if enable_rtc and "prev_action_chunk" in obs and obs["prev_action_chunk"] is not None:
+            sample_kwargs["prev_action_chunk"] = np.asarray(
+                obs["prev_action_chunk"], dtype=np.float32
+            )
         if "inference_delay" in obs:
-            sample_kwargs["inference_delay"] = obs["inference_delay"]
+            sample_kwargs["inference_delay"] = int(obs["inference_delay"])
         if "execute_horizon" in obs:
-            sample_kwargs["execute_horizon"] = obs["execute_horizon"]
-        # if "enable_rtc" in obs:
-        #     sample_kwargs["enable_rtc"] = obs["enable_rtc"]
-        # if "mask_prefix_delay" in obs:
-        #     sample_kwargs["mask_prefix_delay"] = obs["mask_prefix_delay"]
-        # if "prefix_attention_schedule" in obs:
-        #     sample_kwargs["prefix_attention_schedule"] = obs["prefix_attention_schedule"]
-        # if "max_guidance_weight" in obs:
-        #     sample_kwargs["max_guidance_weight"] = obs["max_guidance_weight"]
+            sample_kwargs["execute_horizon"] = int(obs["execute_horizon"])
+        if "max_guidance_weight" in obs:
+            sample_kwargs["max_guidance_weight"] = float(obs["max_guidance_weight"])
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 

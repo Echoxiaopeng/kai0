@@ -348,8 +348,11 @@ class Pi0RTC(_model.BaseModel):
             v_t = jnp.nan_to_num(v_t, nan=0.0, posinf=0.0, neginf=0.0)
             return x_t + dt * v_t, time + dt
 
-        use_rtc = enable_rtc and prev_action_chunk is not None
+        # Gate on prev only: enable_rtc is resolved in Policy.infer (omit prev when disabled).
+        # Do not branch on a traced enable_rtc bool inside this jitted method.
+        use_rtc = prev_action_chunk is not None
         step_fn = rtc_step if use_rtc else base_step
+        del enable_rtc  # unused; kept in signature for API compatibility
 
         # Integrate for exactly num_steps steps from t=1.0 -> 0.0 to match training.
         def scan_step(carry, _):
