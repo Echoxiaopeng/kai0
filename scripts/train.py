@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
+import time
 from typing import Any
 
 import etils.epath as epath
@@ -278,10 +279,16 @@ def main(config: _config.TrainConfig):
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step, config.save_train_state)
+            logging.info(f"Saving checkpoint at step {step} ...")
+            t0 = time.monotonic()
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            t_submit = time.monotonic() - t0
+            logging.info(f"Checkpoint save submitted in {t_submit:.2f}s (async) at step {step}")
 
     logging.info("Waiting for checkpoint manager to finish")
+    t0 = time.monotonic()
     checkpoint_manager.wait_until_finished()
+    logging.info(f"Checkpoint wait_until_finished took {time.monotonic() - t0:.2f}s")
 
 
 if __name__ == "__main__":
