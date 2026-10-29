@@ -55,113 +55,122 @@ def process_actions(actions, action_dim):
     return actions
 
 
+def _mixture_dirs(data_config: _config.DataConfig, base_dir: str | None) -> list[tuple[str, float]]:
+    """Return (data_dir, sample_weight) pairs for norm-stat computation.
+
+    When config has `mixtures`, use those dirs and weights so stats match training mix.
+    Otherwise fall back to a single `base_dir` / `repo_id`.
+    """
+    if base_dir is not None:
+        return [(base_dir, 1.0)]
+    if data_config.mixtures:
+        return [(m.repo_id, float(m.weight)) for m in data_config.mixtures]
+    if data_config.repo_id is None:
+        raise ValueError("Either base_dir must be provided or config must have repo_id/mixtures")
+    return [(data_config.repo_id, 1.0)]
+
+
+def _weight_repeat(weight: float, weights: list[float]) -> int:
+    """Integer repeat count so relative frequencies ≈ mixture weights."""
+    scale = 1.0 / min(weights)
+    return max(1, int(round(weight * scale)))
+
+
 def main(config_name: str, base_dir: str | None = None, max_frames: int | None = None):
     """
     Compute normalization statistics for a config.
     
     Args:
         config_name: Name of the config to use
-        base_dir: Base directory containing the data. If None, will be read from config.
+        base_dir: Base directory containing the data. If None, will be read from config
+            (all `mixtures` repos when set, else `repo_id`).
         max_frames: Maximum number of frames to process. If None, processes all data.
     """
     # Load config
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
     action_dim = config.model.action_dim
-    
-    # Determine base directory
-    if base_dir is None:
-        if data_config.repo_id is None:
-            raise ValueError("Either base_dir must be provided or config must have repo_id")
-        # Use repo_id as base directory (it contains the full path)
-        base_dir = data_config.repo_id
-        print(f"Auto-detected base directory from config: {base_dir}")
-    
-    base_path = Path(base_dir)
-    if not base_path.exists():
-        raise ValueError(f"Base directory does not exist: {base_dir}")
-    
-    print(f"Reading data from: {base_dir}")
+
+    dirs = _mixture_dirs(data_config, base_dir)
+    for d, _ in dirs:
+        if not Path(d).exists():
+            raise ValueError(f"Base directory does not exist: {d}")
+
+    weights = [w for _, w in dirs]
     print(f"Action dimension: {action_dim}")
-    
+    print("Reading data from:")
+    for d, w in dirs:
+        print(f"  {d}  (weight={w}, repeat={_weight_repeat(w, weights)})")
+
     # Keys to collect
     keys = ["state", "actions"]
     collected_data = {key: [] for key in keys}
-    
+
     # Column names in the parquet files
     state_col = "observation.state"
     action_col = "action"
-    
+
     total_frames = 0
     files_processed = 0
-    
-    # Collect all parquet files
-    parquet_files = []
-    for root, dirs, files in os.walk(base_dir):
-        for file in files:
-            if file.endswith(".parquet"):
-                parquet_files.append(os.path.join(root, file))
-    
-    # Sort files for deterministic ordering (same as dataset ordering)
-    parquet_files.sort()
-    
-    print(f"Found {len(parquet_files)} parquet files")
-    
-    # Process each parquet file
-    for file_path in tqdm(parquet_files, desc="Processing files"):
-        try:
-            df = pd.read_parquet(file_path)
-        except Exception as e:
-            print(f"Failed to read {file_path}: {e}")
-            continue
-        
-        # Check if required columns exist
-        if state_col not in df.columns or action_col not in df.columns:
-            continue
-        
-        try:
-            # Extract and process state data
-            states_list = []
-            actions_list = []
-            
-            for i in range(len(df)):
-                try:
-                    # Get state
-                    state = np.array(df[state_col].iloc[i])
-                    state = process_state(state, action_dim)
-                    states_list.append(state)
-                    
-                    # Get action
-                    action = np.array(df[action_col].iloc[i])
-                    action = process_actions(action, action_dim)
-                    actions_list.append(action)
-                    
-                    total_frames += 1
-                    
-                    # Check max_frames limit
-                    if max_frames is not None and total_frames >= max_frames:
-                        break
-                        
-                except Exception as e:
-                    continue
-            
-            if states_list:
-                collected_data["state"].append(np.stack(states_list))
-            if actions_list:
-                collected_data["actions"].append(np.stack(actions_list))
-            
-            files_processed += 1
-            
-            # Check max_frames limit
-            if max_frames is not None and total_frames >= max_frames:
-                print(f"\nReached max_frames limit: {max_frames}")
-                break
-                
-        except Exception as e:
-            print(f"Failed to process {file_path}: {e}")
-            continue
-    
-    print(f"\nProcessed {files_processed} files with {total_frames} frames")
+    hit_max = False
+
+    for data_dir, weight in dirs:
+        parquet_files = []
+        for root, _dirs, files in os.walk(data_dir):
+            for file in files:
+                if file.endswith(".parquet"):
+                    parquet_files.append(os.path.join(root, file))
+        parquet_files.sort()
+        repeat = _weight_repeat(weight, weights)
+        print(f"\n[{data_dir}] {len(parquet_files)} parquet files, repeat x{repeat}")
+
+        for file_path in tqdm(parquet_files, desc=Path(data_dir).name):
+            try:
+                df = pd.read_parquet(file_path)
+            except Exception as e:
+                print(f"Failed to read {file_path}: {e}")
+                continue
+
+            if state_col not in df.columns or action_col not in df.columns:
+                continue
+
+            try:
+                states_list = []
+                actions_list = []
+
+                for i in range(len(df)):
+                    try:
+                        state = process_state(np.array(df[state_col].iloc[i]), action_dim)
+                        action = process_actions(np.array(df[action_col].iloc[i]), action_dim)
+                        states_list.append(state)
+                        actions_list.append(action)
+                        total_frames += 1
+                        if max_frames is not None and total_frames >= max_frames:
+                            break
+                    except Exception:
+                        continue
+
+                if states_list:
+                    stacked_s = np.stack(states_list)
+                    stacked_a = np.stack(actions_list)
+                    for _ in range(repeat):
+                        collected_data["state"].append(stacked_s)
+                        collected_data["actions"].append(stacked_a)
+
+                files_processed += 1
+                if max_frames is not None and total_frames >= max_frames:
+                    print(f"\nReached max_frames limit: {max_frames}")
+                    hit_max = True
+                    break
+            except Exception as e:
+                print(f"Failed to process {file_path}: {e}")
+                continue
+
+        if hit_max:
+            break
+
+    print(f"\nProcessed {files_processed} files with {total_frames} unique frames "
+          f"(mixture-weighted repeats applied before stats)")
     
     # Compute statistics using RunningStats (same as org version)
     print("\nComputing statistics...")

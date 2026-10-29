@@ -65,8 +65,20 @@ class AssetsConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotMixture:
+    """One LeRobot dataset entry in a weighted mixture.
+
+    Sampling uses P(dataset_i) = weight_i / sum(weights), independent of dataset size.
+    """
+
+    repo_id: str
+    weight: float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
+    # When `mixtures` is non-empty, this is still used for assets / norm_stats.
     repo_id: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
@@ -92,6 +104,10 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional weighted mixture of LeRobot datasets. If non-empty, the data loader samples
+    # from these repos with P(i) ∝ weight_i (size-independent). `repo_id` remains the assets path.
+    mixtures: Sequence[LeRobotMixture] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -400,6 +416,9 @@ class LerobotAgilexDataConfig(DataConfigFactory):
     # if insert progress into prompt
     insert_advantage_into_prompt: bool = False
 
+    # Weighted mixture of LeRobot datasets (optional). See LeRobotMixture.
+    mixtures: Sequence[LeRobotMixture] = ()
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
 
@@ -449,6 +468,7 @@ class LerobotAgilexDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
+            mixtures=self.mixtures,
         )
 
 @dataclasses.dataclass(frozen=True)
@@ -1174,18 +1194,26 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_flatten_fold_normal",
         model=pi0_config.Pi0Config(pi05=True),
-        data = LerobotAgilexDataConfig(
+        data=LerobotAgilexDataConfig(
+            # assets / norm_stats path
             repo_id="/home/kian/kai0/data/FlattenFold/base",
             default_prompt="Flatten and fold the cloth.",
             use_delta_joint_actions=False,
+            # Sample new:old ≈ 3:1 (edit weights as needed). Remove mixtures to use repo_id only.
+            mixtures=(
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/base", weight=1.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1026", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1027", weight=2.0),
+            
+            ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/kian/kai0/checkpoints/Task_A/mixed_1/params"
         ),
         num_train_steps=80_000,
         # Save every 2000 steps as temporary; permanently keep only steps % 20000 == 0
-        save_interval=5000,
-        keep_period=20_000,
+        save_interval=2000,
+        keep_period=5_000,
         num_workers=8,
         batch_size=128,  # 4x A100: use GPUs 4-7; raise to 256 if using 8 GPUs
         wandb_enabled=False,

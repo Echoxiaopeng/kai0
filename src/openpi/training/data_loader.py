@@ -55,12 +55,52 @@ class TransformedDataset(Dataset[T_co]):
     def __init__(self, dataset: Dataset, transforms: Sequence[_transforms.DataTransformFn]):
         self._dataset = dataset
         self._transform = _transforms.compose(transforms)
+        # Propagate mixture sampling weights (if any) through transform wrappers.
+        self.sample_weights = getattr(dataset, "sample_weights", None)
 
     def __getitem__(self, index: SupportsIndex) -> T_co:
         return self._transform(self._dataset[index])
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+
+class MixtureDataset(Dataset):
+    """Concatenation of LeRobot datasets with per-sample weights for WeightedRandomSampler.
+
+    For mixture weight w_i and length N_i, each frame in dataset i gets weight w_i / N_i so that
+    P(sample from dataset i) = w_i / sum(w), independent of dataset sizes.
+    """
+
+    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float]):
+        if not datasets:
+            raise ValueError("MixtureDataset requires at least one dataset.")
+        if len(datasets) != len(weights):
+            raise ValueError(f"Got {len(datasets)} datasets but {len(weights)} weights.")
+        if any(w <= 0 for w in weights):
+            raise ValueError(f"Mixture weights must be positive, got {weights}.")
+
+        self._datasets = list(datasets)
+        self._concat = torch.utils.data.ConcatDataset(
+            typing.cast(list[torch.utils.data.Dataset], self._datasets)
+        )
+        sample_weights: list[float] = []
+        for ds, w in zip(self._datasets, weights, strict=True):
+            n = len(ds)
+            if n <= 0:
+                raise ValueError("Mixture dataset entry has length 0.")
+            sample_weights.extend([w / n] * n)
+        self.sample_weights = sample_weights
+        logging.info(
+            "MixtureDataset: %s",
+            ", ".join(f"len={len(ds)} weight={w}" for ds, w in zip(self._datasets, weights, strict=True)),
+        )
+
+    def __getitem__(self, index: SupportsIndex):
+        return self._concat[index.__index__()]
+
+    def __len__(self) -> int:
+        return len(self._concat)
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -128,28 +168,56 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _make_lerobot_dataset(
+    repo_id: str,
+    action_horizon: int,
+    action_sequence_keys: Sequence[str],
+    *,
+    prompt_from_task: bool,
+) -> Dataset:
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    dataset: Dataset = lerobot_dataset.LeRobotDataset(
+        repo_id,
+        delta_timestamps={
+            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
+        },
+    )
+    if prompt_from_task:
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
+    if data_config.mixtures:
+        datasets = []
+        weights = []
+        for mix in data_config.mixtures:
+            datasets.append(
+                _make_lerobot_dataset(
+                    mix.repo_id,
+                    action_horizon,
+                    data_config.action_sequence_keys,
+                    prompt_from_task=data_config.prompt_from_task,
+                )
+            )
+            weights.append(mix.weight)
+        return MixtureDataset(datasets, weights)
+
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+    return _make_lerobot_dataset(
+        repo_id,
+        action_horizon,
+        data_config.action_sequence_keys,
+        prompt_from_task=data_config.prompt_from_task,
     )
-
-    if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
-
-    return dataset
 
 def create_advantage_torch_dataset(
     data_config: _config.DataConfig,
@@ -387,6 +455,20 @@ def create_torch_data_loader(
             local_batch_size = batch_size
     else:
         local_batch_size = batch_size // jax.process_count()
+
+    # Size-independent mixture sampling: P(dataset_i) ∝ weight_i
+    sample_weights = getattr(dataset, "sample_weights", None)
+    if sampler is None and sample_weights is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(dataset),
+            replacement=True,
+            generator=generator,
+        )
+        shuffle = False
+        logging.info("Using WeightedRandomSampler for LeRobot mixture (%d samples)", len(dataset))
 
     logging.info(f"local_batch_size: {local_batch_size}")
     data_loader = TorchDataLoader(
