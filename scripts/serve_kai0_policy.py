@@ -10,8 +10,13 @@ Run from the Kai0 repository:
 RTC (real-time chunking) — same JAX checkpoint, Pi0RTC model class:
 
     uv run scripts/serve_kai0_policy.py \
-      --checkpoint checkpoints/pi05_flatten_fold_normal/my_fold_from_mixed1/5000 \
+      --checkpoint /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_normal_10_26/10000 \
       --rtc --port 8000
+
+
+
+## 测试日志
+目前/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_normal_10_26/10000效果最佳
 """
 
 from __future__ import annotations
