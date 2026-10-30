@@ -214,3 +214,4 @@ eval_results/
 
 # Weights & Biases local runs (do not sync)
 wandb/
+/train_deploy_alignment/inference/arx/inference/logs/

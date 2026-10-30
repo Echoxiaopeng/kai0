@@ -2,7 +2,7 @@
 
 # since this file is sourced use either the provided AMENT_CURRENT_PREFIX
 # or fall back to the destination set at configure time
-: ${AMENT_CURRENT_PREFIX:="/home/kai/ARX_X5/ROS2/X5_ws/install/arm_control"}
+: ${AMENT_CURRENT_PREFIX:="/media/lenovo/data/kian/kai0/train_deploy_alignment/dagger/arx/X5_ws/install/arm_control"}
 if [ ! -d "$AMENT_CURRENT_PREFIX" ]; then
   if [ -z "$COLCON_CURRENT_PREFIX" ]; then
     echo "The compile time prefix path '$AMENT_CURRENT_PREFIX' doesn't " \

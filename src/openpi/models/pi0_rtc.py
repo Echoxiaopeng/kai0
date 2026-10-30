@@ -303,12 +303,23 @@ class Pi0RTC(_model.BaseModel):
             prev_chunk = jnp.asarray(prev_action_chunk, dtype=x_t.dtype)
             if prev_chunk.ndim == 2:
                 prev_chunk = prev_chunk[None, ...]
+            # Guard against NaNs coming from the client stream.
+            prev_chunk = jnp.nan_to_num(prev_chunk, nan=0.0, posinf=0.0, neginf=0.0)
+            # Align time axis to model action_horizon (client chunk_size may differ, e.g. 32 vs 50).
+            ah = int(self.action_horizon)
+            if prev_chunk.shape[1] != ah:
+                if prev_chunk.shape[1] > ah:
+                    prev_chunk = prev_chunk[:, :ah, :]
+                else:
+                    pad_t = jnp.zeros(
+                        (prev_chunk.shape[0], ah - prev_chunk.shape[1], prev_chunk.shape[2]),
+                        dtype=prev_chunk.dtype,
+                    )
+                    prev_chunk = jnp.concatenate([prev_chunk, pad_t], axis=1)
             # clamp execution horizon to available prefix length
             exec_h = jnp.minimum(exec_h, prev_chunk.shape[1])
             # Remember how many action dims the client actually provided before padding.
             provided_dim_before_pad = prev_chunk.shape[-1]
-            # Guard against NaNs coming from the client stream.
-            prev_chunk = jnp.nan_to_num(prev_chunk, nan=0.0, posinf=0.0, neginf=0.0)
             # Align provided prev_action_chunk with model action_dim to avoid shape mismatches at runtime.
             if prev_chunk.shape[-1] != x_t.shape[-1]:
                 if prev_chunk.shape[-1] > x_t.shape[-1]:

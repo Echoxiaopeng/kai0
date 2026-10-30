@@ -1,9 +1,1 @@
-std_msgs/Header header
-
-float64[6] end_pos # x y z w x y z
-
-float64[6] joint_pos
-
-float64 gripper
-
-int64 mode
+/media/lenovo/data/kian/kai0/train_deploy_alignment/dagger/arx/X5_ws/src/arxmsgros2/arx5_arm_msg/msg/RobotCmd.msg
