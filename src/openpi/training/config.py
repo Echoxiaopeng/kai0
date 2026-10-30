@@ -1220,6 +1220,32 @@ _CONFIGS = [
         batch_size=128,  # 4x A100: use GPUs 4-7; raise to 256 if using 8 GPUs
         wandb_enabled=False,
     ),
+    # dagger collect_1029 @80%; old (base+1026+1027) @20% total, keep 1:2:2 within old.
+    # Continue from my_fold_mix1027@30k.
+    TrainConfig(
+        name="pi05_flatten_fold_mix1029",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LerobotAgilexDataConfig(
+            repo_id="/home/kian/kai0/data/FlattenFold/base",
+            default_prompt="Flatten and fold the cloth.",
+            use_delta_joint_actions=False,
+            mixtures=(
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/base", weight=1.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1026", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1027", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1029", weight=20.0),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/kian/kai0/checkpoints/pi05_flatten_fold_normal/my_fold_mix1027/30000/params"
+        ),
+        num_train_steps=30_000,
+        save_interval=2500,
+        keep_period=5_000,
+        num_workers=8,
+        batch_size=128,
+        wandb_enabled=False,
+    ),
     TrainConfig(
         name="pi05_tee_shirt_sort_normal",
         model=pi0_config.Pi0Config(pi05=True),
