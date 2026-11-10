@@ -27,8 +27,10 @@ import sys
 import termios
 import tty
 from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
+from urllib.parse import parse_qs, urlparse
 from sensor_msgs.msg import JointState
 
 try:
@@ -160,6 +162,619 @@ def save_camera_preview(ros_operator, out_dir: str, *, show: bool = False) -> Op
             cv2.destroyAllWindows()
         return str(out)
     return None
+
+
+def build_camera_preview_mosaic(
+    ros_operator,
+    *,
+    tile_size: Tuple[int, int] = (640, 360),
+) -> Optional[np.ndarray]:
+    """Build labeled L|C|R mosaic from latest camera frames (BGR).
+
+    Does not require joint readiness — cameras only — so the web page works
+    even while waiting for arms.
+    """
+    with camera_frame_lock:
+        imgs = ros_operator.get_camera_images()
+    if not imgs:
+        return None
+
+    mapping = [
+        ("cam_left_wrist", "hand_left"),
+        ("cam_high", "top_head"),
+        ("cam_right_wrist", "hand_right"),
+    ]
+    tiles = []
+    for key, policy_key in mapping:
+        bgr = imgs.get(key)
+        if bgr is None:
+            tile = np.zeros((tile_size[1], tile_size[0], 3), dtype=np.uint8)
+            cv2.putText(
+                tile,
+                f"MISSING {key}",
+                (20, tile_size[1] // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        else:
+            labeled = np.asarray(bgr).copy()
+            cv2.putText(
+                labeled,
+                f"{policy_key} ({key})",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            tile = cv2.resize(labeled, tile_size)
+        tiles.append(tile)
+    return np.concatenate(tiles, axis=1)
+
+
+_camera_web_preview = None  # CameraWebPreview | None
+_web_status_lock = threading.Lock()
+_web_status: Dict[str, Any] = {
+    "phase": "booting",
+    "message": "Waiting for sensors / control loop...",
+}
+_ctrl_cmd_lock = threading.Lock()
+_ctrl_cmd_queue: deque = deque()
+_VALID_CTRL_CMDS = frozenset({"c", "s", "home", "q"})
+
+
+def push_ctrl_cmd(cmd: str, source: str = "web") -> bool:
+    """Queue a control command for the main loop (c/s/home/q)."""
+    cmd = str(cmd).strip().lower()
+    if cmd in ("enter", "h", "i", "init"):
+        cmd = "home"
+    if cmd not in _VALID_CTRL_CMDS:
+        return False
+    with _ctrl_cmd_lock:
+        _ctrl_cmd_queue.append({"cmd": cmd, "source": source, "t": time.time()})
+    return True
+
+
+def drain_ctrl_cmds() -> List[Dict[str, Any]]:
+    with _ctrl_cmd_lock:
+        out = list(_ctrl_cmd_queue)
+        _ctrl_cmd_queue.clear()
+    return out
+
+
+def update_web_status(**kwargs) -> None:
+    """Merge fields into the JSON served at /api/status."""
+    with _web_status_lock:
+        _web_status.update(kwargs)
+        _web_status["updated_at"] = time.time()
+
+
+def get_web_status() -> Dict[str, Any]:
+    with _web_status_lock:
+        return dict(_web_status)
+
+
+def _camera_web_index_html() -> bytes:
+    """Single-page control + live camera UI."""
+    return r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ARX Live Control</title>
+<style>
+:root{
+  --bg:#0e1418; --panel:#172027; --line:#2a3a44; --text:#e7eef2; --muted:#8aa0ab;
+  --ok:#3dba7a; --warn:#e0a43a; --bad:#e05a4a; --accent:#3aa7c9; --btn:#24333c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#1b2a33 0%,var(--bg) 55%);
+  color:var(--text);font:14px/1.45 "IBM Plex Sans","Segoe UI",sans-serif;min-height:100vh}
+.wrap{max-width:1280px;margin:0 auto;padding:16px 18px 28px}
+.top{display:flex;flex-wrap:wrap;gap:12px 18px;align-items:flex-end;justify-content:space-between;margin-bottom:14px}
+.brand{font-size:22px;font-weight:700;letter-spacing:.02em}
+.brand span{color:var(--accent);font-weight:600}
+.sub{color:var(--muted);font-size:12px;margin-top:2px}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+  background:var(--panel);border:1px solid var(--line);font-weight:600;font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 3px rgba(138,160,171,.15)}
+.badge.run .dot{background:var(--ok);box-shadow:0 0 0 3px rgba(61,186,122,.2)}
+.badge.idle .dot{background:var(--warn);box-shadow:0 0 0 3px rgba(224,164,58,.2)}
+.badge.dead .dot{background:var(--bad);box-shadow:0 0 0 3px rgba(224,90,74,.2)}
+.grid{display:grid;grid-template-columns:1.7fr 1fr;gap:14px}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+.panel{background:linear-gradient(180deg,#1a262e 0%,var(--panel) 100%);border:1px solid var(--line);
+  border-radius:12px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.panel h2{margin:0;padding:10px 14px;font-size:13px;font-weight:600;color:var(--muted);
+  border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.06em}
+.video-wrap{background:#000;position:relative;min-height:220px}
+.video-wrap img{display:block;width:100%;height:auto;background:#000}
+.hint{padding:8px 14px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px 14px}
+button.ctrl{appearance:none;border:1px solid var(--line);background:var(--btn);color:var(--text);
+  border-radius:10px;padding:12px 10px;font:inherit;font-weight:650;cursor:pointer;
+  transition:transform .08s ease, background .15s ease, border-color .15s}
+button.ctrl:hover{border-color:var(--accent);background:#2b3e49}
+button.ctrl:active{transform:scale(.98)}
+button.ctrl kbd{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:5px;
+  border:1px solid #3b4e59;background:#152028;color:var(--muted);font-size:11px;font-weight:600}
+button.ctrl.go{border-color:#2f6b4d;background:#1d3a2d}
+button.ctrl.stop{border-color:#7a3a34;background:#3a221f}
+button.ctrl.quit{grid-column:1/-1;border-color:#5a3a34;opacity:.95}
+.stats{padding:4px 14px 14px;display:grid;gap:8px}
+.row{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:start;padding:7px 0;
+  border-bottom:1px dashed rgba(42,58,68,.9)}
+.row:last-child{border-bottom:0}
+.k{color:var(--muted);font-size:12px}
+.v{font-variant-numeric:tabular-nums;word-break:break-word}
+.v.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:12.5px}
+.cams{display:flex;flex-wrap:wrap;gap:6px}
+.pill{padding:3px 8px;border-radius:999px;border:1px solid var(--line);font-size:11px;color:var(--muted)}
+.pill.ok{color:#b7f0d0;border-color:#2f6b4d;background:#163126}
+.pill.bad{color:#ffc9c2;border-color:#7a3a34;background:#3a221f}
+.log{max-height:160px;overflow:auto;padding:0 14px 12px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  font-size:11.5px;color:#b7c6ce}
+.log div{padding:3px 0;border-bottom:1px solid rgba(42,58,68,.5)}
+.toast{position:fixed;right:16px;bottom:16px;background:#203039;border:1px solid var(--line);
+  padding:10px 14px;border-radius:10px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none}
+.toast.show{opacity:1;transform:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <div class="brand">ARX <span>Live</span> · cameras + control</div>
+      <div class="sub">网页按键与终端相同：C 开始 · S 停止 · Enter/H 回 init · Q 回零退出</div>
+    </div>
+    <div id="badge" class="badge idle"><span class="dot"></span><span id="badgeText">IDLE</span></div>
+  </div>
+  <div class="grid">
+    <section class="panel">
+      <h2>Cameras · left wrist | D435 top | right wrist</h2>
+      <div class="video-wrap"><img id="stream" src="/stream.mjpg" alt="camera mosaic"/></div>
+      <div class="hint" id="camHint">MJPEG 实时流。画面黑/卡顿请查 GoPro / Elgato / D435。</div>
+    </section>
+    <section class="panel">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button class="ctrl go" data-cmd="c">Start episode <kbd>C</kbd></button>
+        <button class="ctrl stop" data-cmd="s">Stop / hold <kbd>S</kbd></button>
+        <button class="ctrl" data-cmd="home">Go init pose <kbd>Enter</kbd></button>
+        <button class="ctrl quit" data-cmd="q">Zero then quit <kbd>Q</kbd></button>
+      </div>
+      <h2>Status</h2>
+      <div class="stats" id="stats"></div>
+      <h2>Event log</h2>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const statsEl = document.getElementById('stats');
+const logEl = document.getElementById('log');
+const badge = document.getElementById('badge');
+const badgeText = document.getElementById('badgeText');
+const toast = document.getElementById('toast');
+const camHint = document.getElementById('camHint');
+let toastTimer = null;
+
+function row(k,v,mono=false){
+  return `<div class="row"><div class="k">${k}</div><div class="v${mono?' mono':''}">${v}</div></div>`;
+}
+function fmt(x, d=3){
+  if (x===null||x===undefined||Number.isNaN(x)) return '—';
+  if (typeof x==='number') return x.toFixed(d);
+  return String(x);
+}
+function fmtArr(a, d=3){
+  if (!Array.isArray(a) || !a.length) return '—';
+  return a.map(v => fmt(Number(v), d)).join(', ');
+}
+function addLog(msg){
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.textContent = `[${t}] ${msg}`;
+  logEl.prepend(div);
+  while (logEl.childElementCount > 40) logEl.removeChild(logEl.lastChild);
+}
+function showToast(msg){
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>toast.classList.remove('show'), 1800);
+}
+async function sendCmd(cmd){
+  try{
+    const r = await fetch('/api/cmd', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cmd})
+    });
+    const j = await r.json();
+    const msg = j.ok ? `sent ${cmd} (${j.source||'web'})` : (`failed: ${j.error||r.status}`);
+    addLog(msg); showToast(msg);
+  }catch(e){ addLog('cmd error: '+e); }
+}
+document.querySelectorAll('button.ctrl').forEach(btn=>{
+  btn.addEventListener('click', ()=>sendCmd(btn.dataset.cmd));
+});
+window.addEventListener('keydown', (ev)=>{
+  if (ev.target && /input|textarea|select/i.test(ev.target.tagName)) return;
+  const k = ev.key;
+  if (k==='c' || k==='C'){ ev.preventDefault(); sendCmd('c'); }
+  else if (k==='s' || k==='S'){ ev.preventDefault(); sendCmd('s'); }
+  else if (k==='Enter' || k==='h' || k==='H'){ ev.preventDefault(); sendCmd('home'); }
+  else if (k==='q' || k==='Q'){ ev.preventDefault(); sendCmd('q'); }
+});
+
+function render(s){
+  const running = !!s.episode_running;
+  const phase = s.phase || (running ? 'running' : 'idle');
+  badge.className = 'badge ' + (phase==='dead'||phase==='quit' ? 'dead' : (running ? 'run' : 'idle'));
+  badgeText.textContent = (running ? 'RUNNING' : String(phase).toUpperCase())
+    + (s.episode_id ? ` · ep#${s.episode_id}` : '');
+
+  const cams = s.cameras || {};
+  const pills = ['cam_left_wrist','cam_high','cam_right_wrist'].map(name=>{
+    const c = cams[name] || {};
+    const ok = !!c.ok;
+    const shape = c.shape ? c.shape.join('×') : 'missing';
+    return `<span class="pill ${ok?'ok':'bad'}">${name}: ${shape}</span>`;
+  }).join('');
+
+  const age = s.frame_age_s;
+  camHint.textContent = (age==null)
+    ? '等待首帧…'
+    : `帧龄 ${fmt(age,2)}s · encode ~${fmt(s.encode_fps,1)} FPS · JPEG q=${s.jpeg_quality||'—'}`;
+
+  statsEl.innerHTML = [
+    row('Message', s.message || '—'),
+    row('Policy', `${s.policy_host||'—'}:${s.policy_port||'—'}  rtc=${s.rtc_mode?'on':'off'}`, true),
+    row('Prompt', s.prompt || '—'),
+    row('Step / buf', `step=${s.step??'—'}  buf=${s.buffer_len??'—'}  empty=${s.empty_actions??'—'}` , true),
+    row('Gripper mode', s.gripper_mode || '—'),
+    row('Grip state m', `L ${fmt(s.grip_state_L,4)} · R ${fmt(s.grip_state_R,4)}`, true),
+    row('Grip raw', `L ${fmt(s.grip_raw_L,2)} · R ${fmt(s.grip_raw_R,2)}`, true),
+    row('Last cmd', `L ${fmt(s.grip_cmd_L,2)} · R ${fmt(s.grip_cmd_R,2)}`, true),
+    row('qpos L', fmtArr(s.qpos_left, 3), true),
+    row('qpos R', fmtArr(s.qpos_right, 3), true),
+    row('Cameras', `<div class="cams">${pills}</div>`),
+    row('Backend', s.camera_backend || '—', true),
+    row('Hold paused', String(!!s.hold_paused)),
+  ].join('');
+}
+
+async function poll(){
+  try{
+    const r = await fetch('/api/status', {cache:'no-store'});
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+  }catch(e){
+    badge.className = 'badge dead';
+    badgeText.textContent = 'OFFLINE';
+  }
+}
+poll(); setInterval(poll, 400);
+addLog('UI ready — click buttons or use keyboard');
+</script>
+</body>
+</html>""".encode("utf-8")
+
+
+class CameraWebPreview:
+    """Background MJPEG + status/control HTTP UI for live camera verification."""
+
+    def __init__(
+        self,
+        ros_operator,
+        host: str = "0.0.0.0",
+        port: int = 8080,
+        fps: float = 10.0,
+        jpeg_quality: int = 70,
+        tile_width: int = 480,
+        args=None,
+    ):
+        self.ros_operator = ros_operator
+        self.args = args
+        self.host = host
+        self.port = int(port)
+        self.fps = max(float(fps), 1.0)
+        self.jpeg_quality = int(np.clip(jpeg_quality, 30, 95))
+        self.tile_width = max(int(tile_width), 160)
+        self._server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._latest_jpeg: Optional[bytes] = None
+        self._jpeg_lock = threading.Lock()
+        self._encoder_thread: Optional[threading.Thread] = None
+        self._cam_meta_lock = threading.Lock()
+        self._cam_meta: Dict[str, Any] = {}
+        self._last_frame_t: Optional[float] = None
+        self._encode_fps = 0.0
+        update_web_status(
+            phase="cameras",
+            message="Camera web preview started",
+            policy_host=getattr(args, "host", None) if args is not None else None,
+            policy_port=getattr(args, "port", None) if args is not None else None,
+            rtc_mode=bool(getattr(args, "rtc_mode", False)) if args is not None else False,
+            gripper_mode=getattr(args, "gripper_mode", None) if args is not None else None,
+            prompt=lang_embeddings,
+            camera_backend=getattr(args, "camera_backend", None) if args is not None else None,
+            jpeg_quality=self.jpeg_quality,
+            web_fps_target=self.fps,
+        )
+
+    def start(self) -> "CameraWebPreview":
+        if self._thread is not None:
+            return self
+
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                return
+
+            def _send_json(self, code: int, payload: dict):
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _handle_cmd(self, cmd: str, source: str = "web"):
+                ok = push_ctrl_cmd(cmd, source=source)
+                if ok:
+                    print(f"[camera_web] cmd '{cmd}' from {source}")
+                    self._send_json(200, {"ok": True, "cmd": cmd, "source": source})
+                else:
+                    self._send_json(
+                        400,
+                        {"ok": False, "error": f"invalid cmd '{cmd}'", "allowed": sorted(_VALID_CTRL_CMDS)},
+                    )
+
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.end_headers()
+
+            def do_POST(self):
+                path = urlparse(self.path).path
+                if path != "/api/cmd":
+                    self._send_json(404, {"ok": False, "error": "not found"})
+                    return
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                cmd = ""
+                try:
+                    data = json.loads(raw.decode("utf-8") or "{}")
+                    cmd = str(data.get("cmd", ""))
+                except Exception:
+                    self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                    return
+                self._handle_cmd(cmd, source="web")
+
+            def do_GET(self):
+                parsed = urlparse(self.path)
+                path = parsed.path
+                if path in ("/", "/index.html"):
+                    html = _camera_web_index_html()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Content-Length", str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+                    return
+
+                if path == "/api/status":
+                    st = get_web_status()
+                    with owner._cam_meta_lock:
+                        st["cameras"] = dict(owner._cam_meta)
+                        st["frame_age_s"] = (
+                            None
+                            if owner._last_frame_t is None
+                            else max(0.0, time.time() - owner._last_frame_t)
+                        )
+                        st["encode_fps"] = owner._encode_fps
+                    st["episode_running"] = episode_running.is_set()
+                    st["hold_paused"] = hold_paused.is_set()
+                    st["shutdown"] = shutdown_event.is_set()
+                    self._send_json(200, st)
+                    return
+
+                if path == "/api/cmd":
+                    qs = parse_qs(parsed.query)
+                    cmd = (qs.get("cmd") or qs.get("c") or [""])[0]
+                    self._handle_cmd(cmd, source="web-get")
+                    return
+
+                if path in ("/stream.mjpg", "/stream", "/video"):
+                    boundary = b"frame"
+                    self.send_response(200)
+                    self.send_header(
+                        "Content-Type",
+                        f"multipart/x-mixed-replace; boundary={boundary.decode()}",
+                    )
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    interval = 1.0 / owner.fps
+                    try:
+                        while not owner._stop.is_set() and not shutdown_event.is_set():
+                            jpeg = owner._get_latest_jpeg()
+                            if jpeg is None:
+                                time.sleep(0.05)
+                                continue
+                            self.wfile.write(b"--" + boundary + b"\r\n")
+                            self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                            self.wfile.write(
+                                f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+                            )
+                            self.wfile.write(jpeg)
+                            self.wfile.write(b"\r\n")
+                            self.wfile.flush()
+                            time.sleep(interval)
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        return
+                    return
+
+                if path == "/snapshot.jpg":
+                    jpeg = owner._get_latest_jpeg()
+                    if jpeg is None:
+                        self.send_error(503, "No camera frame yet")
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Content-Length", str(len(jpeg)))
+                    self.end_headers()
+                    self.wfile.write(jpeg)
+                    return
+
+                self.send_error(404, "Not found")
+
+        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="camera_web_http",
+            daemon=True,
+        )
+        self._encoder_thread = threading.Thread(
+            target=self._encode_loop,
+            name="camera_web_encode",
+            daemon=True,
+        )
+        self._thread.start()
+        self._encoder_thread.start()
+        print(
+            f"[camera_web] UI: http://127.0.0.1:{self.port}/  "
+            f"(C/S/Enter/Q from browser)  fps~{self.fps:.0f}"
+        )
+        return self
+
+    def _encode_loop(self):
+        interval = 1.0 / self.fps
+        tile_h = int(round(self.tile_width * 360 / 640))
+        while not self._stop.is_set():
+            t0 = time.time()
+            try:
+                with camera_frame_lock:
+                    imgs = self.ros_operator.get_camera_images()
+                meta = {}
+                for key in ("cam_left_wrist", "cam_high", "cam_right_wrist"):
+                    bgr = None if not imgs else imgs.get(key)
+                    if bgr is None:
+                        meta[key] = {"ok": False, "shape": None}
+                    else:
+                        arr = np.asarray(bgr)
+                        meta[key] = {"ok": True, "shape": list(arr.shape)}
+                with self._cam_meta_lock:
+                    self._cam_meta = meta
+
+                mosaic = None
+                if imgs:
+                    mapping = [
+                        ("cam_left_wrist", "hand_left"),
+                        ("cam_high", "top_head"),
+                        ("cam_right_wrist", "hand_right"),
+                    ]
+                    tiles = []
+                    for key, policy_key in mapping:
+                        bgr = imgs.get(key)
+                        if bgr is None:
+                            tile = np.zeros((tile_h, self.tile_width, 3), dtype=np.uint8)
+                            cv2.putText(
+                                tile, f"MISSING {key}", (16, tile_h // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA,
+                            )
+                        else:
+                            labeled = np.asarray(bgr).copy()
+                            cv2.putText(
+                                labeled, f"{policy_key} ({key})", (16, 36),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA,
+                            )
+                            tile = cv2.resize(labeled, (self.tile_width, tile_h))
+                        tiles.append(tile)
+                    mosaic = np.concatenate(tiles, axis=1)
+
+                if mosaic is not None:
+                    ok, buf = cv2.imencode(
+                        ".jpg",
+                        mosaic,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
+                    )
+                    if ok:
+                        with self._jpeg_lock:
+                            self._latest_jpeg = buf.tobytes()
+                        self._last_frame_t = time.time()
+            except Exception as e:
+                if int(time.time() * 2) % 20 == 0:
+                    print(f"[camera_web] encode error: {e}")
+            dt = time.time() - t0
+            if dt > 1e-6:
+                inst = 1.0 / dt
+                self._encode_fps = 0.8 * self._encode_fps + 0.2 * inst if self._encode_fps else inst
+            time.sleep(max(0.0, interval - dt))
+
+    def _get_latest_jpeg(self) -> Optional[bytes]:
+        with self._jpeg_lock:
+            return self._latest_jpeg
+
+    def stop(self):
+        self._stop.set()
+        update_web_status(phase="quit", message="Preview stopped")
+        server = self._server
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        self._server = None
+        self._thread = None
+        self._encoder_thread = None
+        print("[camera_web] preview stopped.")
+
+
+def start_camera_web_preview(ros_operator, args) -> Optional[CameraWebPreview]:
+    """Start browser MJPEG preview unless disabled via CLI."""
+    global _camera_web_preview
+    if getattr(args, "no_web_camera_preview", False):
+        return None
+    try:
+        preview = CameraWebPreview(
+            ros_operator,
+            host=str(getattr(args, "web_camera_host", "0.0.0.0")),
+            port=int(getattr(args, "web_camera_port", 8080)),
+            fps=float(getattr(args, "web_camera_fps", 10.0)),
+            jpeg_quality=int(getattr(args, "web_camera_jpeg_quality", 70)),
+            tile_width=int(getattr(args, "web_camera_tile_width", 480)),
+            args=args,
+        )
+        preview.start()
+        _camera_web_preview = preview
+        return preview
+    except OSError as e:
+        print(f"[camera_web] failed to bind preview port: {e}")
+        return None
+
+
 rtc_prev_chunk_lock = threading.Lock()
 rtc_prev_chunk = None
 delay_buffer = deque(maxlen=20)
@@ -1397,15 +2012,24 @@ def model_inference(args, config, ros_operator):
         seed_pose = np.asarray(hold if hold is not None else init_pose, dtype=float)
         _reset_rtc_prev_from_pose(seed_pose)
         episode_running.set()
-        print(
-            f"[ctrl] episode #{episode_id} STARTED from current pose "
+        msg = (
+            f"episode #{episode_id} STARTED from current pose "
             f"(waiting for fresh policy chunk; press S to stop)"
+        )
+        print(f"[ctrl] {msg}")
+        update_web_status(
+            phase="running",
+            message=msg,
+            episode_id=episode_id,
+            step=0,
+            empty_actions=0,
         )
 
     def _stop_episode(reason: str = "S"):
         nonlocal consecutive_empty_actions, got_first_action
         if not episode_running.is_set() and reason == "S":
             print("[ctrl] already stopped; Enter=go home, C=start, Q=quit")
+            update_web_status(message="already stopped; Enter=home, C=start, Q=quit")
             return
         # Freeze last commanded pose (or measured once) BEFORE clearing running,
         # so the idle hold thread keeps a fixed anti-sag target.
@@ -1426,9 +2050,16 @@ def model_inference(args, config, ros_operator):
             with rtc_prev_chunk_lock:
                 rtc_prev_chunk = None
         ros_operator.publish_hold_pose()
-        print(
-            f"[ctrl] episode STOPPED ({reason}); holding pose. "
+        msg = (
+            f"episode STOPPED ({reason}); holding pose. "
             f"Enter=return to init, C=start, Q=quit"
+        )
+        print(f"[ctrl] {msg}")
+        update_web_status(
+            phase="idle",
+            message=msg,
+            episode_id=episode_id,
+            empty_actions=0,
         )
 
     def _return_to_init(*, force: bool = False) -> bool:
@@ -1454,13 +2085,19 @@ def model_inference(args, config, ros_operator):
             ros_operator.publish_hold_pose()
             _reset_rtc_prev_from_pose(init_pose)
             print("[ctrl] at initial pose (holding). Press C to start, Q to quit")
+            update_web_status(
+                phase="idle",
+                message="at initial pose (holding). Press C to start, Q to quit",
+            )
             return True
         print("[ctrl] return-to-init failed; still holding previous pose")
+        update_web_status(message="return-to-init failed; still holding previous pose")
         return False
 
     def _quit_to_zero():
         """Stop episode if needed, return to startup zero pose, then exit."""
         print("[ctrl] Q: return to zero then quit...")
+        update_web_status(phase="quit", message="Q: returning to zero then quit...")
         try:
             if episode_running.is_set():
                 _stop_episode("Q")
@@ -1478,19 +2115,53 @@ def model_inference(args, config, ros_operator):
             print(f"[ctrl] go-zero-before-quit failed: {e}")
         shutdown_event.set()
 
+    def _apply_ctrl_cmd(cmd: str, source: str = "kbd"):
+        if cmd == "q":
+            _quit_to_zero()
+            return
+        if cmd == "s":
+            _stop_episode("S" if source.startswith("kbd") else f"web:{source}")
+            return
+        if cmd == "home":
+            update_web_status(message=f"home requested ({source})")
+            _return_to_init()
+            return
+        if cmd == "c":
+            if episode_running.is_set():
+                print("[ctrl] already running; press S to stop first")
+                update_web_status(message="already running; press S to stop first")
+            else:
+                _start_episode()
+
     keys = None
     try:
         keys = TerminalKeys()
         keys.__enter__()
         use_keys = True
     except Exception as e:
-        print(f"[ctrl] keyboard unavailable ({e}); auto-starting episode")
+        print(f"[ctrl] keyboard unavailable ({e}); use web UI buttons or auto-wait")
         use_keys = False
-        _start_episode()
+        # Prefer web/terminal later; do not auto-start if web preview is up.
+        if _camera_web_preview is None:
+            print("[ctrl] no web UI either; auto-starting episode")
+            _start_episode()
 
     print("Starting control loop...")
     print("[ctrl] keys: C=start, S=stop, Enter=init pose (after S), Q=zero then quit")
-    if use_keys:
+    print("[ctrl] same keys/buttons also work on the camera web page")
+    update_web_status(
+        phase="idle",
+        message="waiting for C to start (terminal or web)",
+        episode_id=episode_id,
+        step=0,
+        prompt=lang_embeddings,
+        policy_host=args.host,
+        policy_port=args.port,
+        rtc_mode=bool(args.rtc_mode),
+        gripper_mode=args.gripper_mode,
+        camera_backend=getattr(args, "camera_backend", None),
+    )
+    if use_keys or _camera_web_preview is not None:
         print("[ctrl] waiting for C to start...")
     try:
         while rclpy.ok() and step < max_publish_step and not shutdown_event.is_set():
@@ -1498,19 +2169,19 @@ def model_inference(args, config, ros_operator):
                 try:
                     for key in keys.read():
                         if key == "q":
-                            _quit_to_zero()
-                            break
-                        if key == "s":
-                            _stop_episode("S")
+                            push_ctrl_cmd("q", source="kbd")
+                        elif key == "s":
+                            push_ctrl_cmd("s", source="kbd")
                         elif key in ("\n", "\r"):
-                            _return_to_init()
+                            push_ctrl_cmd("home", source="kbd")
                         elif key == "c":
-                            if episode_running.is_set():
-                                print("[ctrl] already running; press S to stop first")
-                            else:
-                                _start_episode()
+                            push_ctrl_cmd("c", source="kbd")
                 except KeyboardInterrupt:
-                    _quit_to_zero()
+                    push_ctrl_cmd("q", source="kbd")
+
+            for item in drain_ctrl_cmds():
+                _apply_ctrl_cmd(item["cmd"], source=item.get("source", "web"))
+                if shutdown_event.is_set():
                     break
             if shutdown_event.is_set():
                 break
@@ -1523,6 +2194,29 @@ def model_inference(args, config, ros_operator):
             imgs, j_left, j_right = frame
             qpos = ros_operator.get_joint_positions(j_left, j_right)
             observed_qpos_history.append(qpos.copy())
+            raw = getattr(ros_operator, "_last_raw_grip", (None, None))
+            last_cmd = published_actions_history[-1] if published_actions_history else None
+            buf_len = 0
+            if stream_buffer is not None:
+                try:
+                    with stream_buffer.lock:
+                        buf_len = len(stream_buffer.cur_chunk)
+                except Exception:
+                    buf_len = 0
+            update_web_status(
+                episode_id=episode_id,
+                step=step,
+                empty_actions=consecutive_empty_actions,
+                buffer_len=buf_len,
+                qpos_left=[float(x) for x in qpos[:6]],
+                qpos_right=[float(x) for x in qpos[7:13]],
+                grip_state_L=float(qpos[6]),
+                grip_state_R=float(qpos[13]),
+                grip_raw_L=raw[0],
+                grip_raw_R=raw[1],
+                grip_cmd_L=None if last_cmd is None else float(last_cmd[6]),
+                grip_cmd_R=None if last_cmd is None else float(last_cmd[13]),
+            )
 
             if not episode_running.is_set():
                 # Idle hold thread already servos frozen pose; keep a tick here too.
@@ -1637,6 +2331,11 @@ def model_inference(args, config, ros_operator):
                 gripper_debug_logger.finalize()
             except Exception as e:
                 print(f"[gripper_debug] finalize error: {e}")
+        try:
+            if _camera_web_preview is not None:
+                _camera_web_preview.stop()
+        except Exception as e:
+            print(f"[camera_web] stop error: {e}")
         ros_operator.cleanup_cameras()
 
         print("ARX5 inference controller shut down.")
@@ -1880,6 +2579,41 @@ def main():
         action="store_true",
         help="Also pop up a mosaic window (needs DISPLAY).",
     )
+    parser.add_argument(
+        "--no_web_camera_preview",
+        action="store_true",
+        help="Disable live MJPEG camera page (enabled by default).",
+    )
+    parser.add_argument(
+        "--web_camera_host",
+        type=str,
+        default="0.0.0.0",
+        help="Bind address for live camera web preview.",
+    )
+    parser.add_argument(
+        "--web_camera_port",
+        type=int,
+        default=8080,
+        help="HTTP port for live camera web preview (open http://HOST:PORT/).",
+    )
+    parser.add_argument(
+        "--web_camera_fps",
+        type=float,
+        default=10.0,
+        help="Target FPS for camera web preview encode/stream.",
+    )
+    parser.add_argument(
+        "--web_camera_jpeg_quality",
+        type=int,
+        default=70,
+        help="JPEG quality 30-95 for camera web preview.",
+    )
+    parser.add_argument(
+        "--web_camera_tile_width",
+        type=int,
+        default=480,
+        help="Width of each camera tile in the web mosaic.",
+    )
     parser.add_argument("--host", default="192.168.10.31")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--control_frequency", type=float, default=20.0)
@@ -2030,6 +2764,8 @@ def main():
                 show=bool(args.show_camera_preview),
             )
 
+        start_camera_web_preview(ros_operator, args)
+
         if args.auto_homing:
             print("Auto homing...")
             ros_operator.smooth_return_to_zero(duration=3.0)
@@ -2060,6 +2796,11 @@ def main():
                     gripper_debug_logger.finalize()
             except Exception as e:
                 print(f"Gripper debug finalize error: {e}")
+            try:
+                if _camera_web_preview is not None:
+                    _camera_web_preview.stop()
+            except Exception as e:
+                print(f"Camera web preview stop error: {e}")
             try:
                 if "ros_operator" in locals() and ros_operator is not None:
                     ros_operator.cleanup_cameras()

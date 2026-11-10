@@ -110,9 +110,9 @@ class InjectDefaultPrompt(DataTransformFn):
             data["prompt"] = np.asarray(self.prompt)
         return data
 
+
 @dataclasses.dataclass(frozen=True)
 class InsertAdvantageIntoPrompt(DataTransformFn):
-
     def __call__(self, data: DataDict) -> DataDict:
         assert "advantage" in data, f"advantage is not in data, data_keys: {data.keys()}"
         assert "prompt" in data, f"prompt is not in data, data_keys: {data.keys()}"
@@ -123,6 +123,8 @@ class InsertAdvantageIntoPrompt(DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class Normalize(DataTransformFn):
+    """Normalize dimensions covered by the stats, preserving any trailing padding."""
+
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
     use_quantiles: bool = False
@@ -145,14 +147,22 @@ class Normalize(DataTransformFn):
         )
 
     def _normalize(self, x, stats: NormStats):
-        mean, std = stats.mean[..., : x.shape[-1]], stats.std[..., : x.shape[-1]]
-        return (x - mean) / (std + 1e-6)
+        dim = min(x.shape[-1], stats.mean.shape[-1])
+        mean, std = stats.mean[..., :dim], stats.std[..., :dim]
+        normalized = (x[..., :dim] - mean) / (std + 1e-6)
+        if dim < x.shape[-1]:
+            return np.concatenate([normalized, x[..., dim:]], axis=-1)
+        return normalized
 
     def _normalize_quantile(self, x, stats: NormStats):
         assert stats.q01 is not None
         assert stats.q99 is not None
-        q01, q99 = stats.q01[..., : x.shape[-1]], stats.q99[..., : x.shape[-1]]
-        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+        dim = min(x.shape[-1], stats.q01.shape[-1])
+        q01, q99 = stats.q01[..., :dim], stats.q99[..., :dim]
+        normalized = (x[..., :dim] - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+        if dim < x.shape[-1]:
+            return np.concatenate([normalized, x[..., dim:]], axis=-1)
+        return normalized
 
 
 @dataclasses.dataclass(frozen=True)

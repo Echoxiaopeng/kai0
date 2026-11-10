@@ -2,6 +2,9 @@
 
 Deploy trained OpenPi policies on **ARX-X5** dual-arm robots (RealSense cameras, ROS2). Inference runs by sending observations to a **policy server** (on a GPU host) and applying the returned action chunks on the robot, with optional temporal smoothing [\[2\]](#references) or **RTC (real-time chunking)** [\[1\]](#references).
 
+> **当前推荐流程（无主臂 + GoPro/D435 hybrid + Kai0）**见：  
+> **[ROS_HYBRID_KAI0_GUIDE.md](ROS_HYBRID_KAI0_GUIDE.md)**（启动顺序、键盘 C/S/Enter/Q、夹爪、RTC、安全退出）。
+
 ---
 
 ## Prerequisites: ARX-X5 and ROS2 setup

@@ -17,6 +17,19 @@ RTC (real-time chunking) — same JAX checkpoint, Pi0RTC model class:
 
 ## 测试日志
 目前/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_normal_10_26/10000效果最佳
+
+# 2026/10/30测试日志
+checkpoint: /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_normal_10_27/30000
+效果：目前最优，针对个别特殊情况还是无法恢复。
+
+# 2026/11/06测试日志
+checkpoint: 
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_cont_dagger/dagger_human/15000
+效果：目前最优，也是针对个别特殊情况还是无法恢复。
+
+# 2026/11/10测试日志
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix_human_low/5000
+效果：有些情况比较犹豫
 """
 
 from __future__ import annotations
@@ -25,11 +38,12 @@ import argparse
 import logging
 from pathlib import Path
 
+from openpi import transforms
+from openpi.policies import platform_policy
 from openpi.policies import policy_config
 from openpi.serving import websocket_policy_server
 from openpi.shared import normalize
 from openpi.training import config as training_config
-from openpi import transforms
 
 DEFAULT_CHECKPOINT = Path(
     "checkpoints/pi05_flatten_fold_normal/my_fold_from_mixed1/5000"
@@ -54,11 +68,41 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=f"Serve Pi0RTC ({RTC_CONFIG}) for prev_action_chunk / delay guidance.",
     )
-    parser.add_argument("--norm-stats", type=Path, default=None)
+    parser.add_argument(
+        "--norm-stats",
+        type=Path,
+        default=None,
+        help="Norm stats JSON. Defaults to checkpoint/assets/norm_stats.json, then checkpoint.parent/norm_stats.json.",
+    )
+    parser.add_argument(
+        "--preprocessing",
+        choices=("legacy", "platform-joint14"),
+        default="legacy",
+        help=(
+            "Preprocessing contract. legacy preserves the existing Kai0 pipeline (default). "
+            "platform-joint14 selects the OpenPI-UMI composition used by the new platform: "
+            "raw state14, min/max normalization, and a 2D state tokenizer input. "
+            "Select explicitly to match training; norm-stat dimensions do not choose the mode."
+        ),
+    )
     parser.add_argument("--default-prompt", default="Flatten and fold the cloth.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     return parser.parse_args()
+
+
+def resolve_norm_stats_path(checkpoint: Path, norm_stats: Path | None = None) -> Path:
+    if norm_stats is not None:
+        candidates = (norm_stats.expanduser().resolve(),)
+    else:
+        candidates = (
+            checkpoint / "assets" / "norm_stats.json",
+            checkpoint.parent / "norm_stats.json",
+        )
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError("Norm stats not found. Checked: " + ", ".join(str(path) for path in candidates))
 
 
 def main() -> None:
@@ -82,13 +126,7 @@ def main() -> None:
             RTC_CONFIG,
         )
 
-    norm_stats_path = (
-        args.norm_stats.expanduser().resolve()
-        if args.norm_stats is not None
-        else checkpoint.parent / "norm_stats.json"
-    )
-    if not norm_stats_path.is_file():
-        raise FileNotFoundError(f"Norm stats not found: {norm_stats_path}")
+    norm_stats_path = resolve_norm_stats_path(checkpoint, args.norm_stats)
 
     config = training_config.get_config(config_name)
     # Training repack also requires ``action``; inference observations do not
@@ -110,22 +148,39 @@ def main() -> None:
             )
         ]
     )
-    stats = normalize.load(norm_stats_path.parent)
-    logging.info("Loading config=%s checkpoint=%s rtc=%s", config_name, checkpoint, args.rtc)
-    logging.info("Loading norm stats=%s", norm_stats_path)
-    policy = policy_config.create_trained_policy(
-        config,
+    logging.info(
+        "Loading config=%s checkpoint=%s rtc=%s preprocessing=%s",
+        config_name,
         checkpoint,
-        repack_transforms=inference_repack,
-        default_prompt=args.default_prompt,
-        norm_stats=stats,
+        args.rtc,
+        args.preprocessing,
     )
+    logging.info("Loading norm stats=%s", norm_stats_path)
+    if args.preprocessing == "platform-joint14":
+        policy = platform_policy.create_trained_platform_policy(
+            config,
+            checkpoint,
+            repack_transforms=inference_repack,
+            default_prompt=args.default_prompt,
+            norm_stats_path=norm_stats_path,
+        )
+    else:
+        stats = normalize.deserialize_json(norm_stats_path.read_text())
+        policy = policy_config.create_trained_policy(
+            config,
+            checkpoint,
+            repack_transforms=inference_repack,
+            default_prompt=args.default_prompt,
+            norm_stats=stats,
+        )
 
     metadata = dict(policy.metadata)
     metadata.update(
         {
             "config": config_name,
             "checkpoint": str(checkpoint),
+            "preprocessing": args.preprocessing,
+            "norm_stats_path": str(norm_stats_path),
             "supports_rtc": bool(args.rtc),
             "rtc_config": RTC_CONFIG if args.rtc else None,
             "observation_contract": (

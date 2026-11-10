@@ -5,6 +5,47 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.transforms as _transforms
 
 
+@pytest.mark.parametrize("use_quantiles", [False, True])
+@pytest.mark.parametrize("shape", [(14,), (32,), (50, 32), (2, 50, 32)])
+def test_normalize_preserves_uncovered_dimensions(use_quantiles, shape):
+    stats = _transforms.NormStats(
+        mean=np.full(14, 2.0),
+        std=np.full(14, 4.0),
+        q01=np.full(14, -2.0),
+        q99=np.full(14, 6.0),
+    )
+    values = np.full(shape, 4.0)
+    values[..., 14:] = np.linspace(0.0, 1.0, shape[-1] - 14)
+    original = values.copy()
+
+    normalized = _transforms.Normalize({"state": stats}, use_quantiles=use_quantiles)({"state": values})
+
+    assert normalized["state"].shape == shape
+    np.testing.assert_allclose(normalized["state"][..., :14], 0.5, atol=1e-6)
+    np.testing.assert_array_equal(normalized["state"][..., 14:], original[..., 14:])
+    np.testing.assert_array_equal(values, original)
+    restored = _transforms.Unnormalize({"state": stats}, use_quantiles=use_quantiles)(normalized)
+    np.testing.assert_allclose(restored["state"], original, atol=1e-6)
+
+
+@pytest.mark.parametrize("use_quantiles", [False, True])
+@pytest.mark.parametrize("stats_dim", [32, 40])
+def test_normalize_full_stats(use_quantiles, stats_dim):
+    stats = _transforms.NormStats(
+        mean=np.full(stats_dim, 2.0),
+        std=np.full(stats_dim, 4.0),
+        q01=np.full(stats_dim, -2.0),
+        q99=np.full(stats_dim, 6.0),
+    )
+
+    normalized = _transforms.Normalize({"actions": stats}, use_quantiles=use_quantiles)(
+        {"actions": np.full((50, 32), 4.0)}
+    )
+
+    assert normalized["actions"].shape == (50, 32)
+    np.testing.assert_allclose(normalized["actions"], 0.5, atol=1e-6)
+
+
 def test_repack_transform():
     transform = _transforms.RepackTransform(
         structure={
