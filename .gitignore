@@ -208,6 +208,9 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-% macOS
+# macOS
 .DS_Store
 eval_results/
+
+# Weights & Biases local runs (do not sync)
+wandb/
