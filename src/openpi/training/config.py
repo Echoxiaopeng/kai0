@@ -1370,6 +1370,40 @@ _CONFIGS = [
         batch_size=128,
         wandb_enabled=True,  # WANDB_MODE=offline at launch
     ),
+    # Continue from cont_dagger@15k; complete human 1110@~31%, intervention humans@~8%, regular@~62%.
+    TrainConfig(
+        name="pi05_flatten_fold_mix1110",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LerobotAgilexDataConfig(
+            repo_id="/home/kian/kai0/data/FlattenFold/base",
+            default_prompt="Flatten and fold the cloth.",
+            use_delta_joint_actions=False,
+            mixtures=(
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/base", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1026", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1027", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1030", weight=2.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1110", weight=4.0),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1029_human", weight=0.5),
+                LeRobotMixture(repo_id="/home/kian/kai0/data/FlattenFold/collect_1106_human", weight=0.5),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/kian/kai0/checkpoints/pi05_flatten_fold_cont_dagger/my_fold_cont_dagger/15000/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-6,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        save_interval=2500,
+        keep_period=5_000,
+        num_workers=8,
+        batch_size=128,
+        wandb_enabled=True,  # WANDB_MODE=offline at launch
+    ),
     TrainConfig(
         name="pi05_tee_shirt_sort_normal",
         model=pi0_config.Pi0Config(pi05=True),
