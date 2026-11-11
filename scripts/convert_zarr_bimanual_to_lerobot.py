@@ -9,6 +9,20 @@ Target (kai0 Agilex / FlattenFold-compatible):
   observation.state [14] = [j0(6), g0, j1(6), g1]
   action [14]           = next-frame absolute joint state (last frame repeats)
   images: top_head <- camera1, hand_left <- camera0, hand_right <- camera2
+
+Example:
+  cd /media/lenovo/data/kian/kai0
+  export PATH="/media/lenovo/data/kian/kai0/.venv/bin:$PATH"
+  unset PYTHONPATH
+
+  python scripts/convert_zarr_bimanual_to_lerobot.py \\
+    --zarr /media/lenovo/data/kian/kai0_dagger_10_29 \\
+    --out-root /media/lenovo/data/kian \\
+    --repo-id FlattenFold/collect_1029 \\
+    --fps 20 \\
+    --prompt "Flatten and fold the cloth."
+
+  # Output: /media/lenovo/data/kian/FlattenFold/collect_1029
 """
 
 from __future__ import annotations
