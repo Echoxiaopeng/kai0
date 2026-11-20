@@ -9,6 +9,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
+from openpi.models import pi0_mem_prefix as _mem_prefix
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
@@ -95,16 +96,27 @@ class Pi0RTC(_model.BaseModel):
             )
         )
         llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
+        use_visual_memory = bool(config.use_visual_memory)
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
                 variant="So400m/14",
                 pool_type="none",
-                scan=True,
+                scan=not use_visual_memory,
                 dtype_mm=config.dtype,
+                temporal_attention_every=config.memory_temporal_attention_every if use_visual_memory else None,
             )
         )
-        img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
+        init_image = next(iter(config.fake_obs().images.values()))
+        if use_visual_memory:
+            import jax.numpy as jnp
+
+            if init_image.ndim == 4:
+                init_image = init_image[:, None]
+            frame_mask = jnp.ones(init_image.shape[:2], dtype=bool)
+            img.lazy_init(init_image, train=False, frame_mask=frame_mask, rngs=rngs)
+        else:
+            img.lazy_init(init_image, train=False, rngs=rngs)
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
@@ -115,6 +127,7 @@ class Pi0RTC(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        _mem_prefix.init_mem_modules(self, config, paligemma_width=paligemma_config.width, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -123,35 +136,7 @@ class Pi0RTC(_model.BaseModel):
     def embed_prefix(
         self, obs: _model.Observation
     ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
-        input_mask = []
-        ar_mask = []
-        tokens = []
-        # embed images
-        for name in obs.images:
-            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
-
-            tokens.append(image_tokens)
-            input_mask.append(
-                einops.repeat(
-                    obs.image_masks[name],
-                    "b -> b s",
-                    s=image_tokens.shape[1],
-                )
-            )
-            # image tokens attend to each other
-            ar_mask += [False] * image_tokens.shape[1]
-
-        # add language (aka tokenized inputs)
-        if obs.tokenized_prompt is not None:
-            tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
-            tokens.append(tokenized_inputs)
-            input_mask.append(obs.tokenized_prompt_mask)
-            # full attention between image and language inputs
-            ar_mask += [False] * tokenized_inputs.shape[1]
-        tokens = jnp.concatenate(tokens, axis=1)
-        input_mask = jnp.concatenate(input_mask, axis=1)
-        ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask
+        return _mem_prefix.embed_prefix_with_mem(self, obs)
 
     @at.typecheck
     def embed_suffix(

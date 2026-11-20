@@ -58,14 +58,15 @@ IMAGE_RESOLUTION = (224, 224)
 # {
 #     # Observation data.
 #     "image": {
-#         "base_0_rgb": (float32|uint8)[*b, h, w, 3],  # RGB image in [-1, 1] or [0, 255]
+#         "base_0_rgb": (float32|uint8)[*b, h, w, 3] or [*b, t, h, w, 3],  # RGB in [-1, 1] or [0, 255]
 #         ...  # Additional camera views
 #     },
 #     "image_mask": {
-#         "base_0_rgb": bool[*b],  # True if image is valid
+#         "base_0_rgb": bool[*b] or bool[*b, t],  # True if image/frame is valid
 #         ...  # Masks for additional views
 #     },
-#     "state": float32[*b, s],  # Low-dimensional robot state
+#     "state": float32[*b, s] or [*b, t, s],  # Low-dimensional robot state
+#     "state_mask": bool[*b, t],  # Optional MEM proprio frame validity
 #     "tokenized_prompt": int32[*b, l],  # Optional, tokenized language prompt
 #     "tokenized_prompt_mask": bool[*b, l],  # Optional, mask for tokenized prompt
 #     "token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for FAST model
@@ -76,6 +77,7 @@ IMAGE_RESOLUTION = (224, 224)
 # }
 # where:
 #   *b = batch dimensions
+#   t = optional MEM history frames
 #   h,w = image height/width
 #   s = state dimension
 #   l = sequence length
@@ -87,14 +89,19 @@ class Observation(Generic[ArrayT]):
 
     See `Observation.from_dict` to see the expected dictionary form. This is the format
     that should be produced by the data transforms.
+
+    With MEM enabled, images may be ``[*b, t, h, w, c]``, image_masks ``[*b, t]``,
+    and state ``[*b, t, s]`` with optional ``state_mask`` ``[*b, t]``.
     """
 
-    # Images, in [-1, 1] float32.
-    images: dict[str, at.Float[ArrayT, "*b h w c"]]
-    # Image masks, with same keys as images.
-    image_masks: dict[str, at.Bool[ArrayT, "*b"]]
-    # Low-dimensional robot state.
-    state: at.Float[ArrayT, "*b s"]
+    # Images, in [-1, 1] float32. Shape [*b h w c] or [*b t h w c] with MEM.
+    images: dict[str, at.Float[ArrayT, "..."]]
+    # Image masks, with same keys as images. Shape [*b] or [*b t] with MEM.
+    image_masks: dict[str, at.Bool[ArrayT, "..."]]
+    # Low-dimensional robot state. Shape [*b s] or [*b t s] with MEM.
+    state: at.Float[ArrayT, "..."]
+    # Optional MEM proprioceptive frame validity mask. Shape [*b t].
+    state_mask: at.Bool[ArrayT, "..."] | None = None
 
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
@@ -112,9 +119,9 @@ class Observation(Generic[ArrayT]):
     episode_index: at.Int[ArrayT, "*b"] | None = None
 
     frame_index: at.Int[ArrayT, "*b"] | None = None
-    
+
     progress: at.Float[ArrayT, "*b"] | None = None
-    
+
     episode_length: Union[at.Int[ArrayT, "*b"], at.Float[ArrayT, "*b"]] | None = None
 
     image_original: dict[str, at.Float[ArrayT, "*b H W C"]] | None = None
@@ -130,8 +137,12 @@ class Observation(Generic[ArrayT]):
             if data["image"][key].dtype == np.uint8:
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
-                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
-        
+                img = data["image"][key].to(torch.float32) / 255.0 * 2.0 - 1.0
+                # Legacy pytorch path expects NHWC → NCHW; MEM video is NT HWC and stays channels-last.
+                if img.ndim == 4 and img.shape[-1] == 3:
+                    img = img.permute(0, 3, 1, 2)
+                data["image"][key] = img
+
         # * advantage estimator specific fields change
         if data.get("image_original", None) is not None:
             for key in data["image_original"]:
@@ -139,18 +150,19 @@ class Observation(Generic[ArrayT]):
                     data["image_original"][key] = data["image_original"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
                 elif hasattr(data["image_original"][key], "dtype") and data["image_original"][key].dtype == torch.uint8:
                     data["image_original"][key] = data["image_original"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
-        
+
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
             state=data["state"],
+            state_mask=data.get("state_mask"),
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
             # advantage estimator specific fields
             frame_index=data.get("frame_index", None),
-            episode_length=data.get("episode_length", None), 
+            episode_length=data.get("episode_length", None),
             progress=data.get("progress", None),
             image_original=data.get("image_original", None),
             episode_index=data.get("episode_index", None),
@@ -179,27 +191,42 @@ def preprocess_observation(
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
+
+    Supports single-frame ``[*b, h, w, c]`` and MEM multi-frame ``[*b, t, h, w, c]`` images.
     """
 
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
-    batch_shape = observation.state.shape[:-1]
+    # state is [*b, s] or [*b, t, s]; batch dims exclude the last (state) dim, and also
+    # exclude the optional time dim when present.
+    if observation.state.ndim >= 3:
+        batch_shape = observation.state.shape[:-2]
+    else:
+        batch_shape = observation.state.shape[:-1]
 
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
-        if image.shape[1:3] != image_resolution:
-            logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
-            image = image_tools.resize_with_pad(image, *image_resolution)
+        is_video = image.ndim == 5  # [b, t, h, w, c]
+        if is_video:
+            spatial = image.shape[2:4]
+            flat_image = image.reshape(-1, *image.shape[2:])
+        else:
+            spatial = image.shape[1:3]
+            flat_image = image
+
+        if spatial != image_resolution:
+            logger.info(f"Resizing image {key} from {spatial} to {image_resolution}")
+            flat_image = image_tools.resize_with_pad(flat_image, *image_resolution)
 
         if train:
             # Convert from [-1, 1] to [0, 1] for augmax.
-            image = image / 2.0 + 0.5
+            flat_image = flat_image / 2.0 + 0.5
 
             transforms = []
             if "wrist" not in key:
-                height, width = image.shape[1:3]
+                height, width = flat_image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),
                     augmax.Resize(width, height),
@@ -208,20 +235,25 @@ def preprocess_observation(
             transforms += [
                 augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5),
             ]
-            sub_rngs = jax.random.split(rng, image.shape[0])
-            image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
+            sub_rngs = jax.random.split(rng, flat_image.shape[0])
+            flat_image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, flat_image)
 
             # Back to [-1, 1].
-            image = image * 2.0 - 1.0
+            flat_image = flat_image * 2.0 - 1.0
 
+        if is_video:
+            image = flat_image.reshape(*image.shape[:2], *flat_image.shape[1:])
+        else:
+            image = flat_image
         out_images[key] = image
 
     # obtain mask
     out_masks = {}
     for key in out_images:
         if key not in observation.image_masks:
-            # do not mask by default
-            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool)
+            # Default: all frames/batches valid. Match image leading dims excluding HWC.
+            mask_shape = out_images[key].shape[:-3]
+            out_masks[key] = jnp.ones(mask_shape, dtype=jnp.bool_)
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
@@ -229,6 +261,7 @@ def preprocess_observation(
         images=out_images,
         image_masks=out_masks,
         state=observation.state,
+        state_mask=observation.state_mask,
         tokenized_prompt=observation.tokenized_prompt,
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
@@ -238,6 +271,7 @@ def preprocess_observation(
         episode_length=observation.episode_length,
         image_original=observation.image_original,
         episode_index=observation.episode_index,
+        progress=observation.progress,
     )
 
 

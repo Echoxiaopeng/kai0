@@ -55,17 +55,26 @@ class AgilexInputs(transforms.DataTransformFn):
         # We only mask padding for pi0/pi0_rtc model, not pi05/pi05_rtc or pi0-FAST
         mask_padding = self.model_type in (_model.ModelType.PI0, _model.ModelType.PI0_RTC)
 
-        in_images = data["images"]
+        raw_images = data["images"]
+        pad_by_camera = {
+            k[: -len("_is_pad")]: v for k, v in raw_images.items() if k.endswith("_is_pad")
+        }
+        in_images = {k: v for k, v in raw_images.items() if not k.endswith("_is_pad")}
 
         if set(in_images) - set(self.EXPECTED_CAMERAS) - set(self.EXTRA_CAMERAS):
             raise ValueError(f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
 
-        # Pad the proprioceptive input to the action dimension of the model
-        state = transforms.pad_to_dim(data["state"], self.action_dim)
-        # Ensure state has correct shape [batch_size, state_dim]
-        state = state.squeeze()
+        # Pad the proprioceptive input to the action dimension of the model.
+        # MEM history is (T, S); single-frame is (S,).
+        state = np.asarray(data["state"])
+        state = transforms.pad_to_dim(state, self.action_dim)
+        if state.ndim > 2:
+            state = np.squeeze(state)
+        state_mask = None
+        if "state_is_pad" in data:
+            state_mask = ~np.asarray(data["state_is_pad"], dtype=bool)
 
-        # Parse images to uint8 (H,W,C) since LeRobot automatically stores as float32 (C,H,W)
+        # Parse images to uint8 (H,W,C) or MEM (T,H,W,C). LeRobot stores float32 (C,H,W) or (T,C,H,W).
         images = {}
         image_masks = {}
         for camera in self.EXPECTED_CAMERAS + self.EXTRA_CAMERAS:
@@ -77,11 +86,20 @@ class AgilexInputs(transforms.DataTransformFn):
                 # Ensure image is in uint8 format
                 if np.issubdtype(img.dtype, np.floating):
                     img = (255 * img).astype(np.uint8)
-                # Convert from [C,H,W] to [H,W,C] if needed
-                if img.shape[0] == 3:
+                # Convert from [C,H,W] / [T,C,H,W] to channels-last
+                if img.ndim == 3 and img.shape[0] == 3:
                     img = np.transpose(img, (1, 2, 0))
-                images[self.all_rename_map[camera]] = img
-                image_masks[self.all_rename_map[camera]] = np.True_
+                elif img.ndim == 4 and img.shape[1] == 3:
+                    img = np.transpose(img, (0, 2, 3, 1))
+                dest = self.all_rename_map[camera]
+                images[dest] = img
+                flat_pad = pad_by_camera.get(camera)
+                if flat_pad is not None:
+                    image_masks[dest] = ~np.asarray(flat_pad, dtype=bool)
+                elif img.ndim == 4:
+                    image_masks[dest] = np.ones((img.shape[0],), dtype=bool)
+                else:
+                    image_masks[dest] = np.True_
 
             elif camera not in in_images and camera in self.EXTRA_CAMERAS:
                 continue  # optional camera can be skipped
@@ -100,6 +118,8 @@ class AgilexInputs(transforms.DataTransformFn):
             "image_mask": image_masks,
             "state": masked_state,
         }
+        if state_mask is not None:
+            inputs["state_mask"] = state_mask
 
         # Add actions if present
         if "actions" in data:

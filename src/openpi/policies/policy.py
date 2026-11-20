@@ -1,3 +1,4 @@
+from collections import deque
 from collections.abc import Sequence
 import logging
 import pathlib
@@ -14,6 +15,7 @@ import torch
 from typing_extensions import override
 
 from openpi import transforms as _transforms
+from openpi.models import mem as _mem
 from openpi.models import model as _model
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
@@ -33,6 +35,11 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        # Optional MEM settings (taken from model attrs when omitted).
+        use_visual_memory: bool | None = None,
+        use_proprioceptive_memory: bool | None = None,
+        memory_frames: int | None = None,
+        memory_stride: int | None = None,
     ):
         """Initialize the Policy.
 
@@ -55,6 +62,33 @@ class Policy(BasePolicy):
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
 
+        self._use_visual_memory = (
+            bool(getattr(model, "use_visual_memory", False)) if use_visual_memory is None else use_visual_memory
+        )
+        self._use_proprioceptive_memory = (
+            bool(getattr(model, "use_proprioceptive_memory", False))
+            if use_proprioceptive_memory is None
+            else use_proprioceptive_memory
+        )
+        self._memory_frames = int(memory_frames or getattr(model, "memory_frames", 6) or 6)
+        self._memory_stride = int(memory_stride or getattr(model, "memory_stride", 30) or 30)
+        # Prefer config values when present on the model config object.
+        cfg = getattr(model, "config", None)
+        if cfg is not None:
+            self._memory_frames = int(getattr(cfg, "memory_frames", self._memory_frames))
+            self._memory_stride = int(getattr(cfg, "memory_stride", self._memory_stride))
+            if use_visual_memory is None:
+                self._use_visual_memory = bool(getattr(cfg, "use_visual_memory", self._use_visual_memory))
+            if use_proprioceptive_memory is None:
+                self._use_proprioceptive_memory = bool(
+                    getattr(cfg, "use_proprioceptive_memory", self._use_proprioceptive_memory)
+                )
+
+        self._memory_queues: dict[str, deque] | None = None
+        self._memory_steps_seen = 0
+        self._memory_batch_size: int | None = None
+        self.reset()
+
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
             self._model.eval()
@@ -64,10 +98,123 @@ class Policy(BasePolicy):
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
 
+    def reset(self) -> None:
+        """Clear MEM observation history. Call at each episode boundary.
+
+        Does not clear client-side RTC prev_action_chunk state.
+        """
+        self._memory_steps_seen = 0
+        self._memory_batch_size = None
+        if not (self._use_visual_memory or self._use_proprioceptive_memory):
+            self._memory_queues = None
+            return
+        history_length = (self._memory_frames - 1) * self._memory_stride + 1
+        # Queues are created lazily on first infer once we know which image keys exist.
+        self._memory_queues = {}
+        self._memory_history_length = history_length
+
+    def _ensure_memory_queues(self, obs: dict) -> None:
+        assert self._memory_queues is not None
+        if self._use_visual_memory:
+            images = obs.get("images") or obs.get("image")
+            if isinstance(images, dict):
+                for key in images:
+                    qkey = f"image/{key}"
+                    if qkey not in self._memory_queues:
+                        self._memory_queues[qkey] = deque(maxlen=self._memory_history_length)
+        if self._use_proprioceptive_memory and "state" in obs and "state" not in self._memory_queues:
+            self._memory_queues["state"] = deque(maxlen=self._memory_history_length)
+
+    def _stack_inference_memory(self, obs: dict) -> dict:
+        """Record one observation and attach MEM histories before transforms."""
+        if not (self._use_visual_memory or self._use_proprioceptive_memory):
+            return obs
+        if self._memory_queues is None:
+            self.reset()
+
+        # Skip if the client already provided a temporal batch.
+        images = obs.get("images") or obs.get("image")
+        if isinstance(images, dict) and any(np.asarray(v).ndim >= 4 for v in images.values()):
+            # Unbatched MEM sample is (T,H,W,C) ndim=4; single frame (H,W,C) ndim=3.
+            # Batched would be rare at this stage. Treat ndim>=4 on unbatched as already temporal
+            # only when first dim looks like memory_frames.
+            already = False
+            for v in images.values():
+                arr = np.asarray(v)
+                if arr.ndim == 4 and arr.shape[0] == self._memory_frames:
+                    already = True
+                    break
+            if already:
+                return obs
+        if self._use_proprioceptive_memory and "state" in obs:
+            state = np.asarray(obs["state"])
+            if state.ndim == 2 and state.shape[0] == self._memory_frames:
+                return obs
+
+        self._ensure_memory_queues(obs)
+        result = dict(obs)
+
+        def _append_and_sample(queue_key: str, value: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            value = np.asarray(value)
+            # Work with a leading batch dim of 1 for sample_observation_history.
+            batched = value[None, ...]
+            batch_size = batched.shape[0]
+            if self._memory_batch_size is None:
+                self._memory_batch_size = batch_size
+            elif batch_size != self._memory_batch_size:
+                raise ValueError(
+                    "MEM inference batch size changed without policy.reset(); "
+                    f"expected {self._memory_batch_size}, got {batch_size}"
+                )
+            queue = self._memory_queues[queue_key]
+            if not queue:
+                queue.extend([batched.copy()] * queue.maxlen)
+            else:
+                queue.append(batched.copy())
+            values, padding = _mem.sample_observation_history(
+                list(queue),
+                num_frames=self._memory_frames,
+                stride=self._memory_stride,
+                steps_seen=self._memory_steps_seen + 1,
+            )
+            # Drop the helper batch dim for unbatched policy inputs.
+            return values[0], padding[0]
+
+        if self._use_visual_memory:
+            image_key = "images" if "images" in result else "image"
+            if image_key in result and isinstance(result[image_key], dict):
+                stacked_images = {}
+                stacked_masks = {}
+                for cam, img in result[image_key].items():
+                    if cam.endswith("_is_pad"):
+                        continue
+                    frames, padding = _append_and_sample(f"image/{cam}", img)
+                    stacked_images[cam] = frames
+                    stacked_masks[cam] = ~padding
+                result[image_key] = stacked_images
+                # Prefer model-side image_mask naming after transforms; also stash for raw paths.
+                result.setdefault("image_mask", {})
+                if isinstance(result["image_mask"], dict):
+                    result["image_mask"].update(stacked_masks)
+                # Also store per-camera is_pad for AgilexInputs-style transforms.
+                for cam, padding_inv in stacked_masks.items():
+                    result[image_key][f"{cam}_is_pad"] = ~padding_inv
+
+        if self._use_proprioceptive_memory and "state" in result:
+            frames, padding = _append_and_sample("state", result["state"])
+            result["state"] = frames
+            result["state_is_pad"] = padding
+            result["state_mask"] = ~padding
+
+        self._memory_steps_seen += 1
+        return result
+
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        # MEM history first (single-frame client obs → temporal), then transforms, then RTC kwargs.
+        inputs = self._stack_inference_memory(inputs)
         inputs = self._input_transform(inputs)
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
@@ -149,3 +296,7 @@ class PolicyRecorder(_base_policy.BasePolicy):
 
         np.save(output_path, np.asarray(data))
         return results
+
+    def reset(self) -> None:
+        if hasattr(self._policy, "reset"):
+            self._policy.reset()

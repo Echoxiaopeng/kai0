@@ -33,11 +33,40 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # MEM short-horizon observation memory (https://arxiv.org/abs/2603.03596).
+    # Historical image tokens are fused inside SigLIP and dropped before the
+    # language backbone. Historical proprioceptive states become one continuous
+    # backbone token per frame. Both paths are opt-in and independent.
+    #
+    # MEM pre-trains on six observations spaced one second apart. `memory_stride`
+    # is counted in dataset frames — scale with fps (e.g. stride=10 at 10 fps).
+    use_visual_memory: bool = False
+    use_proprioceptive_memory: bool = False
+    memory_frames: int = 6
+    memory_stride: int = 30
+    memory_temporal_attention_every: int = 4
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
-        if self.discrete_state_input is None:
+        if self.use_proprioceptive_memory:
+            object.__setattr__(self, "discrete_state_input", False)
+        elif self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        if self.memory_frames < 1:
+            raise ValueError("memory_frames must be at least 1")
+        if self.memory_stride < 1:
+            raise ValueError("memory_stride must be at least 1")
+        if self.memory_temporal_attention_every < 1:
+            raise ValueError("memory_temporal_attention_every must be at least 1")
+
+    @property
+    def memory_delta_indices(self) -> list[int] | None:
+        """Frame offsets (oldest → current) used for LeRobot delta_timestamps."""
+        if not (self.use_visual_memory or self.use_proprioceptive_memory):
+            return None
+        horizon = (self.memory_frames - 1) * self.memory_stride
+        return list(range(-horizon, 1, self.memory_stride))
 
     @property
     @override
@@ -53,9 +82,34 @@ class Pi0Config(_model.BaseModelConfig):
         return Pi0(self, rngs=nnx.Rngs(rng))
 
     @override
+    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "Pi0":
+        """Load params, remapping scanned SigLIP weights when MEM visual memory is enabled."""
+        if self.use_visual_memory:
+            from openpi.training.weight_loaders import maybe_remap_siglip_scan_params
+
+            # Build a reference tree (shapes only) to decide whether remapping is needed.
+            ref = nnx.eval_shape(self.create, jax.random.key(0))
+            _, ref_state = nnx.split(ref)
+            params = maybe_remap_siglip_scan_params(params, ref_state.to_pure_dict())
+        return super().load(params, remove_extra_params=remove_extra_params)
+
+    @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+        if self.use_visual_memory:
+            image_spec = jax.ShapeDtypeStruct(
+                [batch_size, self.memory_frames, *_model.IMAGE_RESOLUTION, 3], jnp.float32
+            )
+            image_mask_spec = jax.ShapeDtypeStruct([batch_size, self.memory_frames], jnp.bool_)
+        else:
+            image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
+            image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+
+        if self.use_proprioceptive_memory:
+            state_spec = jax.ShapeDtypeStruct([batch_size, self.memory_frames, self.action_dim], jnp.float32)
+            state_mask_spec = jax.ShapeDtypeStruct([batch_size, self.memory_frames], jnp.bool_)
+        else:
+            state_spec = jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32)
+            state_mask_spec = None
 
         with at.disable_typechecking():
             observation_spec = _model.Observation(
@@ -69,7 +123,8 @@ class Pi0Config(_model.BaseModelConfig):
                     "left_wrist_0_rgb": image_mask_spec,
                     "right_wrist_0_rgb": image_mask_spec,
                 },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
+                state=state_spec,
+                state_mask=state_mask_spec,
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )

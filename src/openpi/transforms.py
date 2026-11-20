@@ -98,7 +98,19 @@ class RepackTransform(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
-        return jax.tree.map(lambda k: flat_item[k], self.structure)
+        packed = jax.tree.map(lambda k: flat_item[k], self.structure)
+        # Carry LeRobot MEM pad masks: ``{src}_is_pad`` → ``{dest}_is_pad`` (flattened).
+        pad_updates = {}
+        flat_structure = flatten_dict(self.structure)
+        for dest_path, src_path in flat_structure.items():
+            pad_src = f"{src_path}_is_pad"
+            if pad_src in flat_item:
+                pad_updates[f"{dest_path}_is_pad"] = flat_item[pad_src]
+        if pad_updates:
+            flat_packed = flatten_dict(packed)
+            flat_packed.update(pad_updates)
+            packed = unflatten_dict(flat_packed)
+        return packed
 
 
 @dataclasses.dataclass(frozen=True)
@@ -220,6 +232,18 @@ class SubsampleActions(DataTransformFn):
         return data
 
 
+def _current_state(state: np.ndarray) -> np.ndarray:
+    """Return the current-timestep state; MEM history is ``(t, s)`` or ``(..., t, s)``."""
+    # Unbatched MEM sample: (t, s). Batched: (b, t, s). Single-frame: (s,) or (b, s).
+    if state.ndim == 2:
+        # Ambiguous between (t, s) and (b, s). Delta/Absolute run on unbatched samples
+        # in the data pipeline, so (t, s) is the MEM case — take the newest frame.
+        return state[-1]
+    if state.ndim >= 3:
+        return state[..., -1, :]
+    return state
+
+
 @dataclasses.dataclass(frozen=True)
 class DeltaActions(DataTransformFn):
     """Repacks absolute actions into delta action space."""
@@ -233,7 +257,7 @@ class DeltaActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
+        state, actions = _current_state(np.asarray(data["state"])), data["actions"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
@@ -255,7 +279,7 @@ class AbsoluteActions(DataTransformFn):
         if "actions" not in data or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
+        state, actions = _current_state(np.asarray(data["state"])), data["actions"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
         actions[..., :dims] += np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
@@ -298,6 +322,10 @@ class TokenizePrompt(DataTransformFn):
         if self.discrete_state_input:
             if (state := data.get("state", None)) is None:
                 raise ValueError("State is required.")
+            state = np.asarray(state)
+            # MEM proprio history is (t, s); discrete prompt uses the current frame only.
+            if state.ndim == 2:
+                state = state[-1]
         else:
             state = None
 

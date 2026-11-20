@@ -57,6 +57,18 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 obs = msgpack_numpy.unpackb(await websocket.recv())
 
+                # MEM / episode boundary: client may send a reset-only payload.
+                if isinstance(obs, dict) and obs.get("reset_memory") and set(obs.keys()) <= {
+                    "reset_memory",
+                    "reset",
+                }:
+                    self._policy.reset()
+                    await websocket.send(packer.pack({"status": "reset"}))
+                    prev_total_time = time.monotonic() - start_time
+                    continue
+                if isinstance(obs, dict) and obs.pop("reset_memory", False):
+                    self._policy.reset()
+
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time

@@ -168,19 +168,59 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _memory_delta_seconds(model_config: _model.BaseModelConfig, fps: float) -> list[float] | None:
+    indices = getattr(model_config, "memory_delta_indices", None)
+    if not indices:
+        return None
+    return [i / fps for i in indices]
+
+
+def _dataset_image_keys(features: dict) -> list[str]:
+    keys = []
+    for key in features:
+        if "image" in key or key.startswith("observation.images"):
+            keys.append(key)
+        elif key == "observation.image":
+            keys.append(key)
+    return keys
+
+
 def _make_lerobot_dataset(
     repo_id: str,
     action_horizon: int,
     action_sequence_keys: Sequence[str],
     *,
     prompt_from_task: bool,
+    model_config: _model.BaseModelConfig | None = None,
 ) -> Dataset:
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    delta_timestamps = {
+        key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
+    }
+    if model_config is not None:
+        mem_deltas = _memory_delta_seconds(model_config, dataset_meta.fps)
+        if mem_deltas is not None:
+            use_visual = bool(getattr(model_config, "use_visual_memory", False))
+            use_proprio = bool(getattr(model_config, "use_proprioceptive_memory", False))
+            if use_visual:
+                image_keys = _dataset_image_keys(dataset_meta.features)
+                if not image_keys:
+                    raise ValueError(
+                        f"use_visual_memory=True but dataset {repo_id!r} has no image features for MEM history"
+                    )
+                for key in image_keys:
+                    delta_timestamps[key] = mem_deltas
+            if use_proprio:
+                state_key = "observation.state" if "observation.state" in dataset_meta.features else "state"
+                if state_key not in dataset_meta.features:
+                    raise ValueError(
+                        f"use_proprioceptive_memory=True but dataset {repo_id!r} has no state feature"
+                    )
+                delta_timestamps[state_key] = mem_deltas
+
     dataset: Dataset = lerobot_dataset.LeRobotDataset(
         repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
     )
     if prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -201,6 +241,7 @@ def create_torch_dataset(
                     action_horizon,
                     data_config.action_sequence_keys,
                     prompt_from_task=data_config.prompt_from_task,
+                    model_config=model_config,
                 )
             )
             weights.append(mix.weight)
@@ -217,6 +258,7 @@ def create_torch_dataset(
         action_horizon,
         data_config.action_sequence_keys,
         prompt_from_task=data_config.prompt_from_task,
+        model_config=model_config,
     )
 
 def create_advantage_torch_dataset(

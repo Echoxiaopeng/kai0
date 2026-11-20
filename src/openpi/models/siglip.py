@@ -21,7 +21,84 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import openpi.models.mem as _mem
 import openpi.training.sharding as sharding
+
+
+class _QKVAttention(nn.Module):
+    """Attention whose params match ``nn.MultiHeadDotProductAttention`` naming.
+
+    Used so MEM space-time layers can reuse the same Q/K/V/Out projections as the
+    spatial path (and therefore load standard SigLIP / pi05 checkpoints).
+    """
+
+    num_heads: int
+    dtype_mm: str = "float32"
+    dropout: float = 0.0
+
+    @nn.compact
+    def __call__(
+        self,
+        x,
+        *,
+        deterministic: bool = True,
+        temporal_mask=None,
+        # When set, ``x`` is ``(B, T, P, D)`` and we run MEM composed space-time attn.
+        space_time: bool = False,
+    ):
+        dim = x.shape[-1]
+        if dim % self.num_heads:
+            raise ValueError(f"dim {dim} not divisible by num_heads {self.num_heads}")
+        head_dim = dim // self.num_heads
+        dense = nn.DenseGeneral
+        q = dense(
+            features=(self.num_heads, head_dim),
+            kernel_init=nn.initializers.xavier_uniform(),
+            dtype=self.dtype_mm,
+            name="query",
+        )(x)
+        k = dense(
+            features=(self.num_heads, head_dim),
+            kernel_init=nn.initializers.xavier_uniform(),
+            dtype=self.dtype_mm,
+            name="key",
+        )(x)
+        v = dense(
+            features=(self.num_heads, head_dim),
+            kernel_init=nn.initializers.xavier_uniform(),
+            dtype=self.dtype_mm,
+            name="value",
+        )(x)
+        out_proj = dense(
+            features=dim,
+            axis=(-2, -1),
+            kernel_init=nn.initializers.xavier_uniform(),
+            dtype=self.dtype_mm,
+            name="out",
+        )
+
+        if space_time:
+            # Flatten heads into last dim for mem.space_time_attention, then restore.
+            q_flat = q.reshape(*q.shape[:-2], dim)
+            k_flat = k.reshape(*k.shape[:-2], dim)
+            v_flat = v.reshape(*v.shape[:-2], dim)
+            attended = _mem.space_time_attention(
+                q_flat,
+                k_flat,
+                v_flat,
+                temporal_mask=temporal_mask,
+                num_heads=self.num_heads,
+                deterministic=deterministic,
+                dropout_rate=self.dropout,
+            )
+            # space_time_attention returns (B,T,P,D); out_proj expects (..., heads, head_dim)
+            attended = attended.reshape(*attended.shape[:-1], self.num_heads, head_dim)
+            return out_proj(attended)
+
+        # Spatial attention on (..., S, H, D) — same math as MultiHeadDotProductAttention.
+        # q/k/v: (batch, seq, heads, head_dim)
+        attn = nn.dot_product_attention(q, k, v, deterministic=deterministic, dtype=self.dtype_mm)
+        return out_proj(attn)
 
 
 def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):
@@ -65,7 +142,7 @@ class MlpBlock(nn.Module):
             "bias_init": nn.initializers.normal(stddev=1e-6),
         }
 
-        _, _, d = x.shape  # n,l,d
+        d = x.shape[-1]
         x = nn.Dense(self.mlp_dim or 4 * d, dtype=self.dtype_mm, **inits)(x)
         x = nn.gelu(x)
         x = nn.Dropout(rate=self.dropout)(x, deterministic)
@@ -73,24 +150,52 @@ class MlpBlock(nn.Module):
 
 
 class Encoder1DBlock(nn.Module):
-    """Single transformer encoder block (MHSA + MLP)."""
+    """Single transformer encoder block (MHSA + MLP).
+
+    When ``use_mem_attention`` is True, attention params are created via
+    :class:`_QKVAttention` named like Flax ``MultiHeadDotProductAttention`` so
+    standard pi05 checkpoints still load, while also supporting MEM space-time.
+    """
 
     mlp_dim: int | None = None  # Defaults to 4x input dim
     num_heads: int = 12
     dropout: float = 0.0
     dtype_mm: str = "float32"
+    use_mem_attention: bool = False
 
     @nn.compact
-    def __call__(self, x, deterministic=True):  # noqa: FBT002
+    def __call__(
+        self,
+        x,
+        deterministic=True,  # noqa: FBT002
+        temporal_mask=None,
+        temporal_posemb=None,
+    ):
         out = {}
         x = sharding.activation_sharding_constraint(x)
-        y = nn.LayerNorm(dtype=self.dtype_mm)(x)
-        y = out["sa"] = nn.MultiHeadDotProductAttention(
-            num_heads=self.num_heads,
-            kernel_init=nn.initializers.xavier_uniform(),
-            deterministic=deterministic,
-            dtype=self.dtype_mm,
-        )(y, y)
+        do_space_time = temporal_mask is not None and temporal_posemb is not None
+        if do_space_time:
+            # Residual stays on the raw input so temporal PE does not accumulate.
+            y = nn.LayerNorm(dtype=self.dtype_mm)(x + temporal_posemb)
+        else:
+            y = nn.LayerNorm(dtype=self.dtype_mm)(x)
+
+        if self.use_mem_attention:
+            y = out["sa"] = _QKVAttention(
+                num_heads=self.num_heads,
+                dtype_mm=self.dtype_mm,
+                dropout=self.dropout,
+                name="MultiHeadDotProductAttention_0",
+            )(y, deterministic=deterministic, temporal_mask=temporal_mask, space_time=do_space_time)
+        else:
+            if do_space_time:
+                raise ValueError("space-time attention requires use_mem_attention=True")
+            y = out["sa"] = nn.MultiHeadDotProductAttention(
+                num_heads=self.num_heads,
+                kernel_init=nn.initializers.xavier_uniform(),
+                deterministic=deterministic,
+                dtype=self.dtype_mm,
+            )(y, y)
         y = sharding.activation_sharding_constraint(y)
         y = nn.Dropout(rate=self.dropout)(y, deterministic)
         x = out["+sa"] = x + y
@@ -118,10 +223,16 @@ class Encoder(nn.Module):
     scan: bool = False
     remat_policy: str = "nothing_saveable"
     dtype_mm: str = "float32"
+    # MEM: every N-th layer (1-indexed) runs composed space-time attention.
+    temporal_attention_every: int | None = None
 
     @nn.compact
-    def __call__(self, x, deterministic=True):  # noqa: FBT002
+    def __call__(self, x, deterministic=True, frame_mask=None):  # noqa: FBT002
         out = {}
+        use_mem = self.temporal_attention_every is not None
+
+        if self.scan and use_mem:
+            raise ValueError("MEM visual memory requires scan=False (past frames are dropped mid-encoder)")
 
         if self.scan:
             block = nn.remat(
@@ -145,6 +256,50 @@ class Encoder(nn.Module):
             )(x, deterministic)
             for lyr in range(self.depth):
                 out[f"block{lyr:02d}"] = jax.tree.map(lambda o, lyr=lyr: o[lyr], scan_out)
+        elif use_mem:
+            # x: (B, T, P, D) when frame_mask is set, else (B, P, D)
+            if frame_mask is None:
+                raise ValueError("MEM encoder requires frame_mask of shape (B, T)")
+            batch_size, num_frames, num_patches, hidden_size = x.shape
+            if self.temporal_attention_every > self.depth:
+                raise ValueError(
+                    f"temporal_attention_every ({self.temporal_attention_every}) must not exceed depth ({self.depth})"
+                )
+            temporal_layers = [i for i in range(self.depth) if (i + 1) % self.temporal_attention_every == 0]
+            last_temporal_index = temporal_layers[-1] if (temporal_layers and num_frames > 1) else -1
+            temporal_positions = _mem.temporal_sinusoidal_embedding(
+                num_frames, hidden_size, dtype=x.dtype
+            )[None, :, None]
+            temporal_mask = _mem.causal_temporal_mask(
+                frame_mask, dtype=x.dtype, num_patches=num_patches
+            )
+
+            for lyr in range(self.depth):
+                block_cur = Encoder1DBlock(
+                    name=f"encoderblock_{lyr}",
+                    dtype_mm=self.dtype_mm,
+                    mlp_dim=self.mlp_dim,
+                    num_heads=self.num_heads,
+                    dropout=self.dropout,
+                    use_mem_attention=True,
+                )
+                active_frames = x.shape[1]
+                is_temporal = active_frames > 1 and (lyr + 1) % self.temporal_attention_every == 0
+                if is_temporal:
+                    x, out[f"block{lyr:02d}"] = block_cur(
+                        x,
+                        deterministic,
+                        temporal_mask=temporal_mask,
+                        temporal_posemb=temporal_positions,
+                    )
+                    if lyr == last_temporal_index:
+                        x = x[:, -1:]
+                else:
+                    flat = x.reshape(batch_size * active_frames, num_patches, hidden_size)
+                    flat, out[f"block{lyr:02d}"] = block_cur(flat, deterministic)
+                    x = flat.reshape(batch_size, active_frames, num_patches, hidden_size)
+            x = x[:, -1]  # (B, P, D)
+            out["pre_ln"] = x
         else:
             # Input Encoder
             for lyr in range(self.depth):
@@ -203,14 +358,35 @@ class _Module(nn.Module):
     # or "dots_with_no_batch_dims_saveable" for more speed (memory costly)
     remat_policy: str = "nothing_saveable"
     dtype_mm: str = "float32"
+    # MEM: when set, ``__call__`` accepts ``(B,T,H,W,C)`` + ``frame_mask``.
+    temporal_attention_every: int | None = None
 
     @nn.compact
-    def __call__(self, image, *, train=False):
+    def __call__(self, image, *, train=False, frame_mask=None):
         out = {}
 
         # Kevin edit: do patch extraction and posemb in float32,
         # because I feel like it's a bit safer.
         image = jnp.asarray(image, jnp.float32)
+        mem_enabled = self.temporal_attention_every is not None
+        is_video = image.ndim == 5  # (B, T, H, W, C)
+        if is_video:
+            if not mem_enabled:
+                raise ValueError("Video input requires temporal_attention_every (MEM visual memory)")
+            batch_size, num_frames = image.shape[:2]
+            if frame_mask is None:
+                frame_mask = jnp.ones((batch_size, num_frames), dtype=bool)
+            flat_image = image.reshape(batch_size * num_frames, *image.shape[2:])
+        elif mem_enabled:
+            # Keep param structure identical to the video path (T=1).
+            batch_size, num_frames = image.shape[0], 1
+            flat_image = image
+            if frame_mask is None:
+                frame_mask = jnp.ones((batch_size, 1), dtype=bool)
+        else:
+            flat_image = image
+            batch_size = image.shape[0]
+            num_frames = 1
 
         # Patch extraction
         x = out["stem"] = nn.Conv(
@@ -220,7 +396,7 @@ class _Module(nn.Module):
             padding="VALID",
             name="embedding",
             dtype=jnp.float32,
-        )(image)
+        )(flat_image)
 
         n, h, w, c = x.shape
         x = jnp.reshape(x, [n, h * w, c])
@@ -232,11 +408,14 @@ class _Module(nn.Module):
             cls = self.param("cls", nn.initializers.zeros, (1, 1, c), x.dtype)
             x = jnp.concatenate([jnp.tile(cls, [n, 1, 1]), x], axis=1)
 
-        n, _, c = x.shape  # n,l,d
+        n, num_tokens, c = x.shape  # n,l,d
         x = nn.Dropout(rate=self.dropout)(x, not train)
 
         # Kevin edit: now cast back to dtype_mm (potentially half precision)
         x = x.astype(self.dtype_mm)
+
+        if mem_enabled:
+            x = x.reshape(batch_size, num_frames, num_tokens, c)
 
         x, out["encoder"] = Encoder(
             depth=self.depth,
@@ -246,9 +425,12 @@ class _Module(nn.Module):
             scan=self.scan,
             remat_policy=self.remat_policy,
             dtype_mm=self.dtype_mm,
+            temporal_attention_every=self.temporal_attention_every if mem_enabled else None,
             name="Transformer",
-        )(x, deterministic=not train)
+        )(x, deterministic=not train, frame_mask=frame_mask if mem_enabled else None)
         encoded = out["encoded"] = x
+        # After MEM, encoded is always (B, P, D) for the current frame.
+        n = encoded.shape[0]
 
         if self.pool_type == "map":
             x = out["head_input"] = MAPHead(

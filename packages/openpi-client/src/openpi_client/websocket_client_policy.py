@@ -55,4 +55,10 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
 
     @override
     def reset(self) -> None:
-        pass
+        """Clear server-side MEM history (and any other policy episode state)."""
+        data = self._packer.pack({"reset_memory": True})
+        self._ws.send(data)
+        response = self._ws.recv()
+        if isinstance(response, str):
+            raise RuntimeError(f"Error resetting inference server:\n{response}")
+        msgpack_numpy.unpackb(response)

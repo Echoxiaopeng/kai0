@@ -11,23 +11,26 @@ import openpi.shared.array_typing as at
 @functools.partial(jax.jit, static_argnums=(1, 2, 3))
 @at.typecheck
 def resize_with_pad(
-    images: at.UInt8[at.Array, "*b h w c"] | at.Float[at.Array, "*b h w c"],
+    images: at.UInt8[at.Array, "... h w c"] | at.Float[at.Array, "... h w c"],
     height: int,
     width: int,
     method: jax.image.ResizeMethod = jax.image.ResizeMethod.LINEAR,
-) -> at.UInt8[at.Array, "*b {height} {width} c"] | at.Float[at.Array, "*b {height} {width} c"]:
+) -> at.UInt8[at.Array, "... {height} {width} c"] | at.Float[at.Array, "... {height} {width} c"]:
     """Replicates tf.image.resize_with_pad. Resizes an image to a target height and width without distortion
     by padding with black. If the image is float32, it must be in the range [-1, 1].
+
+    Accepts ``[h, w, c]``, ``[b, h, w, c]``, or MEM ``[b, t, h, w, c]`` (any leading dims before HWC).
     """
-    has_batch_dim = images.ndim == 4
-    if not has_batch_dim:
-        images = images[None]  # type: ignore
-    cur_height, cur_width = images.shape[1:3]
+    if images.ndim < 3:
+        raise ValueError(f"Expected at least HWC images, got shape {images.shape}")
+    leading = images.shape[:-3]
+    flat = images.reshape((-1, *images.shape[-3:]))
+    cur_height, cur_width = flat.shape[1:3]
     ratio = max(cur_width / width, cur_height / height)
     resized_height = int(cur_height / ratio)
     resized_width = int(cur_width / ratio)
     resized_images = jax.image.resize(
-        images, (images.shape[0], resized_height, resized_width, images.shape[3]), method=method
+        flat, (flat.shape[0], resized_height, resized_width, flat.shape[3]), method=method
     )
     if images.dtype == jnp.uint8:
         # round from float back to uint8
@@ -46,10 +49,7 @@ def resize_with_pad(
         ((0, 0), (pad_h0, pad_h1), (pad_w0, pad_w1), (0, 0)),
         constant_values=0 if images.dtype == jnp.uint8 else -1.0,
     )
-
-    if not has_batch_dim:
-        padded_images = padded_images[0]
-    return padded_images
+    return padded_images.reshape((*leading, height, width, images.shape[-1]))
 
 
 def resize_with_pad_torch(

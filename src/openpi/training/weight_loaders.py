@@ -50,9 +50,43 @@ class CheckpointWeightLoader(WeightLoader):
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        loaded_params = maybe_remap_siglip_scan_params(loaded_params, params)
+        # Missing LoRA + MEM-only projections keep their freshly initialized values.
+        return _merge_params(
+            loaded_params,
+            params,
+            missing_regex=".*lora.*|.*proprio_history_proj.*",
+        )
 
+
+def maybe_remap_siglip_scan_params(loaded_params: at.Params, ref_params: at.Params) -> at.Params:
+    """Unstack SigLIP ``encoderblock`` weights when the reference model uses MEM (scan=False)."""
+    flat_ref = flax.traverse_util.flatten_dict(ref_params, sep="/")
+    flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+    needs_unmap = any("encoderblock_0" in k for k in flat_ref) and any(
+        "/encoderblock/" in k or k.endswith("/encoderblock") for k in flat_loaded
+    )
+    if not needs_unmap:
+        # Also detect scanned key form: .../encoderblock/MultiHeadDotProductAttention_0/...
+        needs_unmap = any("encoderblock_0" in k for k in flat_ref) and any(
+            re.search(r"/encoderblock/", k) for k in flat_loaded
+        )
+    if not needs_unmap:
+        return loaded_params
+
+    # Infer depth from a scanned attention kernel's leading axis.
+    depth = None
+    for k, v in flat_loaded.items():
+        if "/encoderblock/" in k and k.endswith("/kernel"):
+            depth = int(v.shape[0])
+            break
+    if depth is None:
+        return loaded_params
+
+    from openpi.models import mem as _mem
+
+    logger.info("Remapping scanned SigLIP encoderblock weights to unstacked MEM layout (depth=%d)", depth)
+    return _mem.remap_siglip_scan_to_unstacked(loaded_params, depth=depth)
 
 @dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
