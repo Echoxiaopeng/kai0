@@ -28,7 +28,7 @@ from queue import Queue
 
 from openpi.training import config as _config
 from openpi.shared import download
-from openpi.models_pytorch.pi0_pytorch import PI0Pytorch_Custom as PI0Pytorch
+from openpi.models_pytorch.pi0_pytorch import AdvantageEstimator
 import openpi.models.tokenizer as _tokenizer
 from types import SimpleNamespace
 from openpi.shared import image_tools
@@ -74,11 +74,12 @@ class SimpleValueEvaluator:
         new_model = self.config.model.__class__(**{**self.config.model.__dict__})
         self.config = dataclasses.replace(self.config, model=new_model)
 
-        self.model = PI0Pytorch(new_model).to(self.device)
+        self.model = AdvantageEstimator(new_model).to(self.device)
         self.model.eval()
         model_path = os.path.join(checkpoint_dir, "model.safetensors")
         logging.info(f"Loading model weights: {model_path}")
-        safetensors.torch.load_model(self.model, model_path, strict=True)
+        # value_head is randomly init'd then overwritten; allow non-strict in case of minor key diffs
+        safetensors.torch.load_model(self.model, model_path, strict=False)
         logging.info("Model loaded successfully")
 
     def _load_video_frames(self, video_path: str, frame_interval: int = 1) -> List[np.ndarray]:

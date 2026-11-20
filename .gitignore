@@ -215,3 +215,27 @@ eval_results/
 # Weights & Biases local runs (do not sync)
 wandb/
 /train_deploy_alignment/inference/arx/inference/logs/
+
+# Local binaries / tunnels
+/cloudflared
+
+# Experiment runtime & bulky artifacts (keep *.md / *.py / *.sh notes & scripts)
+experiment/**/*.log
+experiment/**/*.log.bak*
+experiment/**/*.pid
+experiment/**/*.out
+experiment/**/*.err
+experiment/**/*.jpg
+experiment/**/*.png
+experiment/**/*.bin
+experiment/**/*.pt
+experiment/**/*.pth
+experiment/**/*.ckpt
+experiment/**/*.safetensors
+experiment/**/*.npz
+experiment/**/*.mp4
+experiment/**/*.avi
+experiment/**/*.webm
+experiment/**/*.npz.0
+experiment/**/*.npz.index
+experiment/**/*.npz.data-*

@@ -1,0 +1,122 @@
+[
+  {
+    "ep": 0,
+    "verdict": "suspicious",
+    "n": 773,
+    "early": 0.0639,
+    "mid": 0.0984,
+    "late": -0.042,
+    "delta": -0.1059,
+    "adv_mean": -0.0082,
+    "curve": "ep_000000_curve.png",
+    "frames": "ep_000000_frames.jpg"
+  },
+  {
+    "ep": 1,
+    "verdict": "weak_ok",
+    "n": 993,
+    "early": 0.08,
+    "mid": 0.1565,
+    "late": 0.109,
+    "delta": 0.0291,
+    "adv_mean": -0.0012,
+    "curve": "ep_000001_curve.png",
+    "frames": "ep_000001_frames.jpg"
+  },
+  {
+    "ep": 2,
+    "verdict": "suspicious",
+    "n": 619,
+    "early": -0.0237,
+    "mid": 0.005,
+    "late": -0.1349,
+    "delta": -0.1112,
+    "adv_mean": -0.0115,
+    "curve": "ep_000002_curve.png",
+    "frames": "ep_000002_frames.jpg"
+  },
+  {
+    "ep": 3,
+    "verdict": "weak_ok",
+    "n": 700,
+    "early": 0.1046,
+    "mid": 0.2247,
+    "late": 0.1751,
+    "delta": 0.0704,
+    "adv_mean": -0.0007,
+    "curve": "ep_000003_curve.png",
+    "frames": "ep_000003_frames.jpg"
+  },
+  {
+    "ep": 4,
+    "verdict": "likely_ok",
+    "n": 874,
+    "early": 0.0828,
+    "mid": 0.1535,
+    "late": 0.1941,
+    "delta": 0.1112,
+    "adv_mean": -0.0012,
+    "curve": "ep_000004_curve.png",
+    "frames": "ep_000004_frames.jpg"
+  },
+  {
+    "ep": 5,
+    "verdict": "suspicious",
+    "n": 572,
+    "early": 0.0405,
+    "mid": 0.0719,
+    "late": -0.0822,
+    "delta": -0.1227,
+    "adv_mean": -0.0129,
+    "curve": "ep_000005_curve.png",
+    "frames": "ep_000005_frames.jpg"
+  },
+  {
+    "ep": 6,
+    "verdict": "suspicious",
+    "n": 800,
+    "early": 0.1396,
+    "mid": 0.1874,
+    "late": 0.1236,
+    "delta": -0.016,
+    "adv_mean": -0.0077,
+    "curve": "ep_000006_curve.png",
+    "frames": "ep_000006_frames.jpg"
+  },
+  {
+    "ep": 7,
+    "verdict": "suspicious",
+    "n": 651,
+    "early": -0.0703,
+    "mid": -0.0274,
+    "late": -0.0961,
+    "delta": -0.0257,
+    "adv_mean": -0.0157,
+    "curve": "ep_000007_curve.png",
+    "frames": "ep_000007_frames.jpg"
+  },
+  {
+    "ep": 8,
+    "verdict": "suspicious",
+    "n": 804,
+    "early": -0.0591,
+    "mid": -0.0192,
+    "late": -0.0977,
+    "delta": -0.0386,
+    "adv_mean": 0.0105,
+    "curve": "ep_000008_curve.png",
+    "frames": "ep_000008_frames.jpg"
+  },
+  {
+    "ep": 9,
+    "verdict": "suspicious",
+    "n": 599,
+    "early": 0.0584,
+    "mid": 0.0905,
+    "late": -0.0538,
+    "delta": -0.1122,
+    "adv_mean": 0.0313,
+    "curve": "ep_000009_curve.png",
+    "frames": "ep_000009_frames.jpg"
+  }
+]

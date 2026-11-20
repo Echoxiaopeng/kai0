@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Advantage / Stage GT Viewer</title>
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #12141a; --panel: #1a1e27; --line: #2a3140; --text: #e8ecf4;
+      --muted: #8b95a8; --ok: #3dbe7b; --weak: #d4a017; --bad: #e25c5c;
+      --accent: #5b8def; --purple: #b57bff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin:0; font-family:"IBM Plex Sans","Noto Sans SC",system-ui,sans-serif; background:var(--bg); color:var(--text);
+      height:100vh; overflow:hidden; display:flex; flex-direction:column;
+    }
+    header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); background:#161a22; flex-wrap:wrap; flex-shrink:0; }
+    header h1 { font-size:15px; font-weight:600; margin:0; }
+    header .meta { color:var(--muted); font-size:12px; max-width:min(42vw, 520px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #badge-box { max-width:min(40vw, 480px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ds-pick { display:flex; align-items:center; gap:6px; }
+    .ds-pick label { font-size:11px; color:var(--muted); }
+    .ds-pick select {
+      background:#12161f; color:var(--text); border:1px solid var(--line); border-radius:6px;
+      padding:5px 8px; font-size:12px; max-width:280px;
+    }
+    .modes { display:flex; gap:6px; }
+    .modes button, .filters button, .review button, .tools button, .nav button, .ann-bar button {
+      background:#222835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:5px 9px; font-size:12px; cursor:pointer;
+    }
+    .modes button.active, .filters button.active { border-color:var(--accent); color:#fff; background:#2a3a55; }
+    .badge { display:inline-flex; gap:6px; font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+    .badge b { color:var(--text); }
+    .layout { display:grid; grid-template-columns:300px 1fr; flex:1; min-height:0; overflow:hidden; }
+    aside { border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--panel); }
+    .filters { padding:10px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px; flex-shrink:0; }
+    .ep-list { overflow:auto; flex:1; min-height:0; padding-bottom:16px; }
+    .ep { width:100%; text-align:left; background:transparent; border:0; border-bottom:1px solid var(--line); color:var(--text); padding:10px 12px; cursor:pointer; font:inherit; }
+    .ep:hover { background:#222835; } .ep.selected { background:#243049; }
+    .ep .row1 { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px; }
+    .ep .title { font-size:13px; font-weight:600; }
+    .tag { font-size:10px; padding:2px 6px; border-radius:4px; text-transform:uppercase; }
+    .tag.likely_ok,.tag.written,.tag.ok,.tag.pass { background:rgba(61,190,123,.15); color:var(--ok); }
+    .tag.weak_ok,.tag.draft,.tag.weak { background:rgba(212,160,23,.15); color:var(--weak); }
+    .tag.suspicious,.tag.todo,.tag.error,.tag.bad,.tag.fail { background:rgba(226,92,92,.15); color:var(--bad); }
+    .tag.has_gt { background:rgba(181,123,255,.15); color:var(--purple); }
+    .tag.pos { background:rgba(61,190,123,.2); color:#6ee7a8; }
+    .tag.neg { background:rgba(226,92,92,.12); color:#f0a0a0; }
+    .tag.disc { background:rgba(91,141,239,.18); color:#9bbcff; }
+    .ep .tags { display:flex; flex-wrap:wrap; gap:4px; justify-content:flex-end; }
+    .ep .stats { font-size:11px; color:var(--muted); line-height:1.35; }
+    .readout .c-disc-pos { color:#6ee7a8; }
+    .readout .c-disc-neg { color:#f0a0a0; }
+    .readout .c-disc-miss { color:#8b95a8; }
+    main { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden; }
+    .top {
+      flex:1 1 auto; min-height:0; overflow:hidden;
+      display:grid; grid-template-columns:minmax(260px,46%) 1fr; gap:12px; padding:12px;
+      border-bottom:1px solid var(--line);
+    }
+    .video-wrap {
+      background:#000; border:1px solid var(--line); border-radius:8px; overflow:hidden;
+      min-height:0; height:100%; max-height:100%;
+    }
+    video { width:100%; height:100%; object-fit:contain; background:#000; }
+    .chart-wrap {
+      background:var(--panel); border:1px solid var(--line); border-radius:8px;
+      padding:8px 10px 4px; min-height:0; height:100%; position:relative;
+    }
+    .chart-wrap canvas { width:100% !important; height:100% !important; }
+    .controls {
+      flex:0 1 auto; max-height:min(46vh, 420px); overflow-y:auto; overflow-x:hidden;
+      padding:10px 12px 14px; display:grid; gap:8px; min-height:0;
+    }
+    .scrub { display:grid; grid-template-columns:70px 1fr 70px; gap:10px; align-items:center; font-size:12px; color:var(--muted); }
+    input[type=range] { width:100%; }
+    .readout {
+      display:flex; flex-wrap:wrap; gap:10px 16px; font-size:12px; color:var(--muted);
+      padding:2px 2px 0; font-variant-numeric:tabular-nums;
+    }
+    .readout .v { color:var(--text); font-weight:600; }
+    .readout .c-abs { color:#5b8def; }
+    .readout .c-aadv { color:#3dbe7b; }
+    .readout .c-radv { color:#d4a017; }
+    .readout .c-stage { color:#b57bff; }
+    .review, .ann-bar, .tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .review textarea { flex:1; min-width:180px; min-height:40px; max-height:72px; background:#12161f; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+    .tools { padding:6px 0 0; border-top:1px dashed var(--line); margin-top:2px; width:100%; }
+    .tools label { font-size:11px; color:var(--muted); }
+    .tools select, .tools input[type=text], .tools input[type=number] {
+      background:#12161f; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:12px; max-width:100%;
+    }
+    #relabel-model { max-width:260px; }
+    #relabel-gpu { min-width:160px; max-width:280px; }
+    #relabel-outdir { min-width:140px; max-width:220px; }
+    .progress {
+      flex:1 1 180px; max-width:420px; height:10px; background:#12161f; border:1px solid var(--line);
+      border-radius:999px; overflow:hidden;
+    }
+    .progress > i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#3dbe7b,#5b8def); }
+    .hint { color:var(--muted); font-size:12px; line-height:1.45; }
+    #relabel-hint { flex:1 1 200px; min-width:0; word-break:break-word; }
+    .split-list { display:flex; flex-wrap:wrap; gap:6px; }
+    .split-chip { background:#2a3140; border:1px solid var(--purple); color:#e6d7ff; border-radius:999px; padding:3px 8px; font-size:12px; }
+    .split-chip button { border:0; background:transparent; color:#ffb4b4; cursor:pointer; margin-left:4px; }
+    .nav { display:flex; gap:8px; margin-left:auto; }
+    .primary { border-color:#3dbe7b !important; background:#1e3a2c !important; }
+    .warn { border-color:#d4a017 !important; }
+    .danger { border-color:#e25c5c !important; background:#3a1e1e !important; color:#ffb4b4 !important; }
+    kbd {
+      display:inline-block; margin-left:4px; padding:0 5px; border:1px solid var(--line);
+      border-bottom-width:2px; border-radius:4px; background:#12161f; color:#c5cede;
+      font:11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; vertical-align:1px;
+    }
+  </style>
+</head>
+<body tabindex="-1">
+  <header>
+    <h1>Advantage / Stage GT Viewer</h1>
+    <div class="ds-pick">
+      <label for="dataset-select">数据集</label>
+      <select id="dataset-select"></select>
+      <label for="label-select">labels</label>
+      <select id="label-select"></select>
+    </div>
+    <div class="modes">
+      <button id="mode-review" class="active">检查 advantage / 离散</button>
+      <button id="mode-annotate">标注 stage 分界</button>
+    </div>
+    <div class="meta" id="meta">loading…</div>
+    <span class="badge" id="badge-box"></span>
+    <div class="nav">
+      <button id="prev">← prev</button>
+      <button id="next">next →</button>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="filters" id="filters"></div>
+      <div class="ep-list" id="ep-list"></div>
+    </aside>
+    <main>
+      <div class="top">
+        <div class="video-wrap"><video id="video" controls playsinline></video></div>
+        <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      </div>
+      <div class="controls">
+        <div class="scrub">
+          <span id="frame-label">frame 0</span>
+          <input id="scrub" type="range" min="0" max="0" value="0" />
+          <span id="time-label">0.00s</span>
+        </div>
+        <div class="readout" id="value-readout">—</div>
+
+        <div id="panel-review" class="review">
+          <button data-mark="pass">标记合理 ✓</button>
+          <button data-mark="fail" title="导出干净数据集时硬剔除">标记不合理 ✗</button>
+          <button data-mark="clear">清除标记</button>
+          <textarea id="note" placeholder="人工备注…"></textarea>
+          <div class="tools" style="width:100%">
+            <button id="btn-export-clean" class="primary">导出干净数据集</button>
+            <button id="btn-export-reset-name" type="button">恢复默认名</button>
+            <label for="export-out-name">新文件夹名</label>
+            <input id="export-out-name" type="text" style="flex:1 1 280px; min-width:200px; max-width:520px" title="导出到源数据集同级目录" />
+            <span class="hint" id="export-hint">不合理(fail)=硬剔除；value 写入新 data/</span>
+            <span class="hint" id="export-path-hint" style="width:100%"></span>
+          </div>
+          <div class="tools" style="width:100%">
+            <label>模型</label>
+            <select id="relabel-model"></select>
+            <label>范围</label>
+            <select id="relabel-scope">
+              <option value="fail" selected>fail</option>
+              <option value="suspicious">suspicious(+fail)</option>
+              <option value="all">all labeled</option>
+            </select>
+            <label>GPU</label>
+            <select id="relabel-gpu"></select>
+            <button id="btn-refresh-gpus" type="button">刷新GPU</button>
+            <label>输出 dirname</label>
+            <input id="relabel-outdir" type="text" placeholder="自动 data_KAI0_steps_relabel" />
+            <button id="btn-relabel" class="warn">模型重标</button>
+            <button id="btn-relabel-stop" class="danger">停止重标</button>
+            <button id="btn-relabel-status">重标状态</button>
+          </div>
+          <div class="tools" style="width:100%">
+            <div class="progress" title="重标进度"><i id="relabel-bar"></i></div>
+            <span class="hint" id="relabel-hint">进度：—</span>
+          </div>
+        </div>
+
+        <div id="panel-annotate" class="ann-bar" style="display:none">
+          <button id="btn-add-split" class="primary" title="快捷键 Space">设为分界 ▶ <kbd>Space</kbd></button>
+          <button id="btn-clear-splits" class="warn" title="快捷键 C">清空分界 <kbd>C</kbd></button>
+          <button id="btn-write" class="primary" title="快捷键 W">写入 parquet <kbd>W</kbd></button>
+          <button id="btn-delete-ep" class="danger" title="快捷键 Delete：从数据集删除当前 episode">删除本 episode <kbd>Del</kbd></button>
+          <div class="split-list" id="split-list"></div>
+        </div>
+
+        <div class="hint" id="hint"></div>
+        <div class="hint" id="detail"></div>
+      </div>
+    </main>
+  </div>
+
+<script>
+let fps=30;
+let meta=null, mode='review', episodes=[], filter='all', current=null, chart=null;
+let splits=[], nFrames=0, suppressSeek=false, datasets=[];
+let currentSeries=null, currentPreview=null;
+let videoSyncGen=0; // bump on episode switch to ignore stale timeupdate
+let reviews={}; // ep -> {mark, note, ts} from advantage_review_*.json
+let relabelModels=[];
+let relabelPollTimer=null;
+
+const $ = (id)=>document.getElementById(id);
+const storeKey = (ds, ep)=>`adv_review::${ds}::${ep}`;
+
+function loadReview(ep){
+  const v = reviews[String(ep)];
+  return v && (v.mark || v.note) ? v : null;
+}
+
+async function refreshReviews(){
+  const res = await (await fetch('/api/review')).json();
+  reviews = res.episodes || {};
+  if(meta){
+    meta.review_file = res.path || meta.review_file;
+    meta.human_review_counts = res.human_review_counts || meta.human_review_counts;
+  }
+  return res;
+}
+
+async function saveReview(ep, obj){
+  const mark = (!obj || (!obj.mark && !obj.note)) ? 'clear' : (obj.mark || 'clear');
+  const note = obj && obj.note ? obj.note : '';
+  const res = await (await fetch('/api/review/mark', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({episode_index: ep, mark, note})
+  })).json();
+  if(res.error){ alert(res.error); return; }
+  if(res.cleared) delete reviews[String(ep)];
+  else if(res.episode) reviews[String(ep)] = res.episode;
+  if(meta) meta.human_review_counts = res.human_review_counts || meta.human_review_counts;
+  updateHeader();
+  renderList();
+}
+
+async function loadRelabelModels(){
+  const res = await (await fetch('/api/relabel/models')).json();
+  relabelModels = res.models || [];
+  const sel=$('relabel-model');
+  if(!sel) return;
+  sel.innerHTML='';
+  for(const m of relabelModels){
+    const opt=document.createElement('option');
+    opt.value = JSON.stringify({model_type:m.model_type, model_name:m.model_name, ckpt_dir:m.ckpt_dir, ckpt_steps:m.ckpt_steps});
+    opt.textContent = `${m.label}${m.has_weights?'':' (缺权重)'}`;
+    if(res.default && m.model_type===res.default.model_type && m.model_name===res.default.model_name && m.ckpt_dir===res.default.ckpt_dir && m.ckpt_steps===res.default.ckpt_steps){
+      opt.selected=true;
+    }
+    sel.appendChild(opt);
+  }
+  syncRelabelOutdirPlaceholder();
+  await loadGpus();
+  await pollRelabelStatus({silent:true});
+}
+
+async function loadGpus(){
+  const sel=$('relabel-gpu');
+  if(!sel) return;
+  const prev = sel.value;
+  let res;
+  try{
+    res = await (await fetch('/api/gpus')).json();
+  }catch(e){
+    sel.innerHTML='';
+    const opt=document.createElement('option');
+    opt.value='0'; opt.textContent='GPU 0 (nvidia-smi 失败)';
+    sel.appendChild(opt);
+    return;
+  }
+  const gpus = res.gpus || [];
+  sel.innerHTML='';
+  if(!gpus.length){
+    const opt=document.createElement('option');
+    opt.value='0'; opt.textContent=res.error ? `GPU查询失败: ${res.error}` : '无 GPU';
+    sel.appendChild(opt);
+    return;
+  }
+  // idle first
+  const ordered = [...gpus].sort((a,b)=> (b.idle-a.idle) || (b.memory_free_mib-a.memory_free_mib));
+  for(const g of ordered){
+    const opt=document.createElement('option');
+    opt.value=String(g.index);
+    opt.textContent=g.label;
+    sel.appendChild(opt);
+  }
+  const prefer = (prev!=='' && [...sel.options].some(o=>o.value===prev))
+    ? prev
+    : (res.recommended!=null ? String(res.recommended) : ordered[0].index);
+  sel.value = String(prefer);
+}
+
+function selectedRelabelModel(){
+  const raw=$('relabel-model').value;
+  try{ return JSON.parse(raw); }catch{ return null; }
+}
+
+function syncRelabelOutdirPlaceholder(){
+  const m=selectedRelabelModel();
+  const input=$('relabel-outdir');
+  if(!input || !m) return;
+  input.placeholder = `data_${m.model_name}_${m.ckpt_steps}_relabel`;
+}
+
+function setRelabelProgress(done, total, percent, text){
+  const bar=$('relabel-bar');
+  const hint=$('relabel-hint');
+  const pct = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
+  if(bar) bar.style.width = `${pct}%`;
+  if(hint) hint.textContent = text || `进度：${done??'?'}/${total??'?'} (${pct}%)`;
+}
+
+function stopRelabelPolling(){
+  if(relabelPollTimer){ clearInterval(relabelPollTimer); relabelPollTimer=null; }
+}
+
+function startRelabelPolling(){
+  stopRelabelPolling();
+  relabelPollTimer = setInterval(()=>pollRelabelStatus({silent:true}), 4000);
+}
+
+function defaultExportFolderName(){
+  if(meta && meta.export_default_folder_name) return meta.export_default_folder_name;
+  if(!meta || !meta.dataset) return '';
+  const base = (meta.dataset_id || meta.dataset.split('/').pop() || 'dataset');
+  const label = meta.label_dirname || 'label';
+  const tag = label.startsWith('data_') ? label.slice(5) : label;
+  return `${base}__adv_${tag}_clean`;
+}
+
+function exportParentDir(){
+  if(!meta || !meta.dataset) return '';
+  const parts = String(meta.dataset).replace(/\/+$/,'').split('/');
+  parts.pop();
+  return parts.join('/') || '/';
+}
+
+function syncExportOutName(force){
+  const input=$('export-out-name');
+  if(!input) return;
+  if(force || !input.value.trim()) input.value = defaultExportFolderName();
+  const hint=$('export-path-hint');
+  if(hint){
+    const name=(input.value||'').trim() || defaultExportFolderName();
+    const parent=exportParentDir();
+    hint.textContent = parent ? `将导出到：${parent}/${name}` : `将导出到：${name}`;
+  }
+}
+
+async function exportCleanDataset(){
+  const hr = (meta && meta.human_review_counts) || {};
+  const nFail = hr.fail||0;
+  const nKept = meta ? (meta.n_kept ?? (meta.n_labeled - nFail)) : '?';
+  syncExportOutName(false);
+  const outName = ($('export-out-name').value||'').trim() || defaultExportFolderName();
+  const fullPath = `${exportParentDir()}/${outName}`;
+  if(!confirm(`导出干净数据集？\n将硬剔除 ${nFail} 个 fail episode，约保留 ${nKept} 集。\n新文件夹：${outName}\n完整路径：${fullPath}\nvalue 写入新目录 data/（源数据不动）。`)) return;
+  $('export-hint').textContent='导出中…';
+  const res = await (await fetch('/api/export_clean_dataset', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({label_dirname: meta && meta.label_dirname, out_name: outName})
+  })).json();
+  if(res.error){ $('export-hint').textContent='失败: '+res.error; alert(res.error); return; }
+  $('export-hint').textContent=`完成 kept=${res.n_kept} excl=${res.n_excluded} → ${res.out_dir}`;
+  if($('export-path-hint')) $('export-path-hint').textContent=`已导出：${res.out_dir}`;
+  alert(`导出完成\nkept=${res.n_kept} excluded=${res.n_excluded}\n${res.out_dir}`);
+}
+
+async function startRelabel(){
+  const m=selectedRelabelModel();
+  if(!m){ alert('请选择模型'); return; }
+  const scope=$('relabel-scope').value;
+  const gpu=$('relabel-gpu').value.trim()||'0';
+  const outdir=($('relabel-outdir').value||'').trim() || null;
+  if(!confirm(`启动模型重标？\nscope=${scope}\n${m.model_type}/${m.model_name}@${m.ckpt_steps}\nGPU=${gpu}\noutput=${outdir||('(默认 *_relabel)')}`)) return;
+  setRelabelProgress(0, resTotalPlaceholder(scope), 0, '启动中…');
+  const res = await (await fetch('/api/relabel', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      model_type:m.model_type, model_name:m.model_name,
+      ckpt_dir:m.ckpt_dir, ckpt_steps:m.ckpt_steps,
+      scope, gpu, output_dirname:outdir, overwrite:false
+    })
+  })).json();
+  if(res.error){ setRelabelProgress(0,0,0,'失败: '+res.error); alert(res.error); return; }
+  setRelabelProgress(0, res.total||res.n_episodes, 0, `已启动 pid=${res.pid} · 0/${res.n_episodes} → ${res.output_dirname}`);
+  startRelabelPolling();
+}
+
+function resTotalPlaceholder(scope){
+  if(scope==='fail') return (meta && meta.human_review_counts && meta.human_review_counts.fail) || '?';
+  if(scope==='suspicious') return (meta && meta.verdict_counts && meta.verdict_counts.suspicious) || '?';
+  return (meta && meta.n_labeled) || '?';
+}
+
+async function pollRelabelStatus(opts){
+  const silent = opts && opts.silent;
+  const res = await (await fetch('/api/relabel/status')).json();
+  if(!res.pid){
+    if(!silent) setRelabelProgress(0,0,0,'无重标任务');
+    stopRelabelPolling();
+    return res;
+  }
+  const done = res.done??0;
+  const total = res.total ?? res.n_episodes ?? '?';
+  const pct = res.percent ?? 0;
+  const state = res.running ? '运行中' : (res.stopped ? '已停止' : (res.failed ? '失败' : '已结束'));
+  const line = res.last_line ? ` · ${res.last_line.slice(0,100)}` : '';
+  setRelabelProgress(done, total, pct, `${state} ${done}/${total} (${pct}%) · GPU ${res.gpu||'?'} → ${res.output_dirname||''}${line}`);
+  if(res.log_tail && !silent) console.log(res.log_tail);
+  if(res.running){
+    if(!relabelPollTimer) startRelabelPolling();
+  } else {
+    stopRelabelPolling();
+    if(res.failed && !res.stopped && !silent){
+      alert('重标失败（常见原因：GPU OOM）。请换更空闲的 GPU 后重试。\n' + (res.last_line||'').slice(0,300));
+    }
+    if(res.output_dirname && !res.failed && !res.stopped){
+      await refreshDatasets();
+      meta = await (await fetch('/api/meta')).json();
+      fillDatasetSelects();
+    }
+  }
+  return res;
+}
+
+async function stopRelabel(){
+  const st = await (await fetch('/api/relabel/status')).json();
+  if(!st.running && !st.pid){
+    setRelabelProgress(st.done||0, st.total||0, st.percent||0, '当前没有运行中的重标任务');
+    return;
+  }
+  if(!confirm(`停止重标？\npid=${st.pid||'?'} · 已完成 ${st.done||0}/${st.total||'?'} → ${st.output_dirname||''}\n已写出的 episode 会保留。`)) return;
+  setRelabelProgress(st.done||0, st.total||0, st.percent||0, '正在停止…');
+  const res = await (await fetch('/api/relabel/stop', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({})
+  })).json();
+  if(res.error){ alert(res.error); return; }
+  stopRelabelPolling();
+  const done = res.done??st.done??0;
+  const total = res.total??st.total??'?';
+  const pct = res.percent??0;
+  setRelabelProgress(done, total, pct, `已停止 ${done}/${total} (${pct}%) → ${res.output_dirname||st.output_dirname||''}`);
+}
+
+/** One-time: push any old browser localStorage marks into the server json. */
+async function migrateLocalReviewsIfAny(){
+  if(!meta || !meta.dataset) return;
+  const dump={};
+  const prefix=`adv_review::${meta.dataset}::`;
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(!k || !k.startsWith(prefix)) continue;
+    const ep=k.slice(prefix.length);
+    try{
+      const obj=JSON.parse(localStorage.getItem(k)||'null');
+      if(obj && (obj.mark==='pass' || obj.mark==='fail')) dump[ep]=obj;
+    }catch{}
+  }
+  if(!Object.keys(dump).length) return;
+  const res = await (await fetch('/api/review/import_local', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({episodes: dump})
+  })).json();
+  if(res.error) return;
+  if(res.imported>0){
+    for(const k of Object.keys(dump)) localStorage.removeItem(prefix+k);
+    await refreshReviews();
+    updateHeader();
+    renderList();
+  }
+}
+
+async function init(){
+  setupModeButtons();
+  await refreshDatasets();
+  meta = await (await fetch('/api/meta')).json();
+  fillDatasetSelects();
+  await refreshReviews();
+  await migrateLocalReviewsIfAny();
+  updateHeader();
+  await setMode('annotate'); // default to annotate since that's the task now
+}
+
+async function refreshDatasets(){
+  const data = await (await fetch('/api/datasets')).json();
+  datasets = data.datasets || [];
+}
+
+function fillDatasetSelects(){
+  const dsSel=$('dataset-select');
+  const lbSel=$('label-select');
+  dsSel.innerHTML='';
+  for(const d of datasets){
+    const opt=document.createElement('option');
+    opt.value=d.path;
+    const parentName=(d.parent||'').split('/').pop();
+    opt.textContent=`${d.id} · ${d.n_source} eps${d.label_dirs.length?` · labels:${d.label_dirs.length}`:''} (${parentName})`;
+    if(meta && d.path===meta.dataset) opt.selected=true;
+    dsSel.appendChild(opt);
+  }
+  fillLabelSelect();
+}
+
+function fillLabelSelect(){
+  const lbSel=$('label-select');
+  const cur = datasets.find(d=>d.path===(meta&&meta.dataset)) || datasets.find(d=>d.path===$('dataset-select').value);
+  const labels = (meta && meta.label_dirs && meta.label_dirs.length) ? meta.label_dirs
+    : (cur ? (cur.label_dirs||[]) : []);
+  lbSel.innerHTML='';
+  if(!labels.length){
+    const opt=document.createElement('option');
+    opt.value=meta?meta.label_dirname:'';
+    opt.textContent=meta&&meta.label_dirname?`${meta.label_dirname} (缺失)`:'(无 labels)';
+    lbSel.appendChild(opt);
+  } else {
+    for(const name of labels){
+      const opt=document.createElement('option');
+      opt.value=name;
+      opt.textContent = name==='data' ? 'data（官方/内嵌 advantage）' : name;
+      if(meta && name===meta.label_dirname) opt.selected=true;
+      lbSel.appendChild(opt);
+    }
+  }
+}
+
+async function switchDataset(){
+  const path=$('dataset-select').value;
+  const label=$('label-select').value || undefined;
+  const res = await (await fetch('/api/select', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dataset: path, label_dirname: label||null})
+  })).json();
+  if(res.error){ alert(res.error); await refreshDatasets(); fillDatasetSelects(); return; }
+  meta=res;
+  await refreshDatasets();
+  fillDatasetSelects();
+  await refreshReviews();
+  await migrateLocalReviewsIfAny();
+  updateHeader();
+  syncExportOutName(true);
+  current=null; splits=[]; nFrames=0;
+  await setMode(mode);
+}
+
+async function switchLabelOnly(){
+  const path=$('dataset-select').value || (meta&&meta.dataset);
+  const label=$('label-select').value;
+  const res = await (await fetch('/api/select', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dataset: path, label_dirname: label})
+  })).json();
+  if(res.error){ alert(res.error); return; }
+  meta=res;
+  await refreshReviews();
+  await migrateLocalReviewsIfAny();
+  updateHeader();
+  syncExportOutName(true);
+  if(mode==='review') await setMode('review');
+  else updateHeader();
+}
+
+function syncFps(){
+  const v = Number(meta && meta.fps);
+  fps = (Number.isFinite(v) && v > 0) ? v : 30;
+}
+
+function updateHeader(){
+  syncFps();
+  if(mode==='review'){
+    const hr = meta.human_review_counts || {};
+    const qc = meta.qc_vs_human || {};
+    $('meta').textContent = `${meta.dataset_id||meta.dataset} · ${meta.label_dirname} · ${fps}fps · labeled ${meta.n_labeled} · kept ${meta.n_kept??'?'} / excl ${meta.n_excluded??0}`;
+    $('badge-box').innerHTML =
+      `auto <b>${meta.verdict_counts.likely_ok||0}</b> ok · <b>${meta.verdict_counts.weak_ok||0}</b> weak · <b>${meta.verdict_counts.suspicious||0}</b> bad` +
+      ` · 人工 ✓<b>${hr.pass||0}</b> / ✗<b>${hr.fail||0}</b>` +
+      (qc.fail_recall!=null ? ` · fail→sus ${qc.fail_suspicious}/${qc.n_fail}` : '') +
+      ` · <span title="${meta.review_file||''}">${(meta.review_file||'').split('/').pop()||'review.json'}</span>`;
+    syncExportOutName(false);
+  } else {
+    $('meta').textContent = `${meta.dataset_id||meta.dataset} · ${fps}fps · source ${meta.n_source} · draft ${meta.n_annotated_draft} · written ${meta.n_annotated_written}`;
+    $('badge-box').innerHTML = `ann file: <b>${(meta.annotations_file||'').split('/').pop()}</b>`;
+  }
+}
+
+function setupModeButtons(){
+  $('mode-review').onclick = ()=>setMode('review');
+  $('mode-annotate').onclick = ()=>setMode('annotate');
+  $('prev').onclick = ()=>shiftEpisode(-1);
+  $('next').onclick = ()=>shiftEpisode(1);
+  $('btn-add-split').onclick = addSplitAtCurrent;
+  $('btn-clear-splits').onclick = clearSplits;
+  $('btn-write').onclick = writeParquet;
+  $('btn-delete-ep').onclick = deleteCurrentEpisode;
+  $('dataset-select').onchange = async ()=>{
+    // when dataset changes, refresh label options for that dataset then select
+    const path=$('dataset-select').value;
+    const d=datasets.find(x=>x.path===path);
+    meta={...(meta||{}), dataset:path, label_dirs:(d&&d.label_dirs)||[], label_dirname:(d&&d.label_dirs&&d.label_dirs[0])||''};
+    fillLabelSelect();
+    await switchDataset();
+  };
+  $('label-select').onchange = ()=>switchLabelOnly();
+  document.querySelectorAll('#panel-review [data-mark]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      if(current==null) return;
+      const note=$('note').value.trim();
+      const mark=btn.dataset.mark;
+      if(mark==='clear') await saveReview(current, null);
+      else await saveReview(current, {mark, note});
+    };
+  });
+  $('note').onchange = async ()=>{
+    if(current==null) return;
+    const prev=loadReview(current)||{};
+    await saveReview(current, {mark:prev.mark||'', note:$('note').value.trim()});
+  };
+  $('btn-export-clean').onclick = exportCleanDataset;
+  $('btn-export-reset-name').onclick = ()=>syncExportOutName(true);
+  $('export-out-name').addEventListener('input', ()=>syncExportOutName(false));
+  $('btn-relabel').onclick = startRelabel;
+  $('btn-relabel-stop').onclick = stopRelabel;
+  $('btn-relabel-status').onclick = ()=>pollRelabelStatus({silent:false});
+  $('btn-refresh-gpus').onclick = ()=>loadGpus();
+  $('relabel-model').onchange = ()=>syncRelabelOutdirPlaceholder();
+  $('scrub').oninput = (e)=>setCursor(Number(e.target.value));
+  // Keep focus off the range so Space/arrows aren't eaten by the scrubber.
+  $('scrub').addEventListener('pointerup', ()=>document.body.focus());
+  $('video').setAttribute('tabindex', '-1');
+  $('video').ontimeupdate = ()=>{
+    if(suppressSeek) return;
+    const v=$('video');
+    // Ignore events while switching episode / before metadata is ready.
+    if(v.readyState < 1) return;
+    if(Number(v.dataset.syncGen||'-1') !== videoSyncGen) return;
+    const frame=Math.min(Number($('scrub').max), Math.max(0, Math.round(v.currentTime*fps)));
+    $('scrub').value=frame; updateFrameLabel(frame); if(chart) chart.update('none');
+  };
+  // capture=true: run before <video>/buttons swallow Space
+  window.addEventListener('keydown', (ev)=>{
+    if(ev.isComposing || ev.metaKey || ev.ctrlKey || ev.altKey || ev.repeat) return;
+    const el = ev.target;
+    const tag = (el && el.tagName || '').toUpperCase();
+    const type = (el && el.type || '').toLowerCase();
+    const typing = tag==='TEXTAREA' || tag==='SELECT' || (tag==='INPUT' && type!=='range');
+    if(typing) return;
+
+    const bind = (fn)=>{
+      ev.preventDefault();
+      ev.stopPropagation();
+      if(document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      fn();
+    };
+
+    if(ev.key==='ArrowLeft'){ bind(()=>shiftEpisode(-1)); return; }
+    if(ev.key==='ArrowRight'){ bind(()=>shiftEpisode(1)); return; }
+    if(ev.key==='ArrowUp'||ev.key==='k'||ev.key==='K'){ bind(()=>setCursor(Math.max(0, Number($('scrub').value)-1))); return; }
+    if(ev.key==='ArrowDown'||ev.key==='j'||ev.key==='J'){ bind(()=>setCursor(Math.min(Number($('scrub').max), Number($('scrub').value)+1))); return; }
+    if(ev.key==='p' || ev.key==='P'){ bind(()=>{ const v=$('video'); if(v.paused) v.play(); else v.pause(); }); return; }
+
+    if(mode!=='annotate') return;
+    if(ev.key===' ' || ev.code==='Space' || ev.key==='Enter'){ bind(()=>addSplitAtCurrent()); return; }
+    if(ev.key==='w' || ev.key==='W'){ bind(()=>writeParquet()); return; }
+    if(ev.key==='c' || ev.key==='C'){ bind(()=>clearSplits()); return; }
+    if(ev.key==='Delete'){ bind(()=>deleteCurrentEpisode()); return; }
+  }, true);
+}
+
+async function setMode(m){
+  mode=m;
+  $('mode-review').classList.toggle('active', m==='review');
+  $('mode-annotate').classList.toggle('active', m==='annotate');
+  $('panel-review').style.display = m==='review' ? 'flex' : 'none';
+  $('panel-annotate').style.display = m==='annotate' ? 'flex' : 'none';
+  $('hint').innerHTML = m==='annotate'
+    ? '快捷键：<kbd>Space</kbd> 设分界 · <kbd>W</kbd> 写入 · <kbd>C</kbd> 清空 · <kbd>Del</kbd> 删除本 ep · <kbd>P</kbd> 播放 · <kbd>←/→</kbd> 换 ep · <kbd>↑/↓</kbd> 逐帧。删除后会把后面的 ep <b>重新编号</b>为连续 0…N-1（可能稍慢）。'
+    : '检查模式：人工✗=导出时硬剔除。可导出干净数据集（value 写入 data/），或换模型对 fail/suspicious 重标。<kbd>←/→</kbd> 换 ep · <kbd>P</kbd> 播放/暂停。';
+  filter='all';
+  meta = await (await fetch('/api/meta')).json();
+  fillDatasetSelects();
+  if(m==='review'){
+    await refreshReviews();
+    await migrateLocalReviewsIfAny();
+    await loadRelabelModels();
+  }
+  updateHeader();
+  const url = m==='annotate' ? '/api/annotate/episodes' : '/api/episodes';
+  const data = await (await fetch(url)).json();
+  episodes = data.episodes || [];
+  renderFilters();
+  renderList();
+  if(episodes.length) selectEpisode(episodes[0].episode_index);
+}
+
+function renderFilters(){
+  const box=$('filters'); box.innerHTML='';
+  const opts = mode==='annotate'
+    ? [['all','all'],['todo','todo'],['draft','draft'],['written','written'],['has_gt','has_gt']]
+    : [['all','all'],['likely_ok','ok'],['weak_ok','weak'],['suspicious','suspicious'],['has_task_index','discretized'],['excluded','excluded(fail)'],['kept','kept'],['reviewed','my reviewed']];
+  for(const [k,label] of opts){
+    const b=document.createElement('button');
+    b.textContent=label; b.dataset.filter=k;
+    if(filter===k) b.classList.add('active');
+    b.onclick=()=>{ filter=k; [...box.children].forEach(x=>x.classList.remove('active')); b.classList.add('active'); renderList(); };
+    box.appendChild(b);
+  }
+}
+
+function filtered(){
+  return episodes.filter(e=>{
+    if(filter==='all') return true;
+    if(mode==='review'){
+      if(filter==='reviewed') return !!loadReview(e.episode_index);
+      if(filter==='excluded') return e.excluded === true || (loadReview(e.episode_index)||{}).mark==='fail';
+      if(filter==='kept') return !(e.excluded === true || (loadReview(e.episode_index)||{}).mark==='fail');
+      if(filter==='has_task_index') return !!e.has_task_index;
+      return e.verdict===filter;
+    }
+    return e.status===filter;
+  });
+}
+
+function renderList(){
+  const list=$('ep-list');
+  const keepScroll = list.scrollTop;
+  list.innerHTML='';
+  for(const e of filtered()){
+    const btn=document.createElement('button');
+    btn.className='ep'+(current===e.episode_index?' selected':'');
+    btn.dataset.ep = String(e.episode_index);
+    if(mode==='annotate'){
+      btn.innerHTML=`<div class="row1"><span class="title">ep ${String(e.episode_index).padStart(4,'0')}</span><span class="tag ${e.status}">${e.status}</span></div>
+        <div class="stats">frames ${e.n_frames} · splits [${(e.splits||[]).join(', ')}] ${e.written?'· written':''}</div>`;
+    } else {
+      const rev=loadReview(e.episode_index);
+      const human = (rev && rev.mark==='pass')
+        ? '<span class="tag pass">人工✓</span>'
+        : (rev && rev.mark==='fail')
+          ? '<span class="tag fail">人工✗</span>'
+          : '';
+      const disc = e.has_task_index
+        ? `<span class="tag disc">pos ${e.pos_pct??'?'}%</span>`
+        : '';
+      const discStats = e.has_task_index
+        ? ` · AWBC pos ${e.pos_pct}% (μ⁺ ${e.pos_mean_adv??'—'} / μ⁻ ${e.neg_mean_adv??'—'})`
+        : '';
+      btn.innerHTML=`<div class="row1"><span class="title">ep ${String(e.episode_index).padStart(4,'0')}</span><span class="tags"><span class="tag ${e.verdict}">${e.verdict}</span>${disc}${human}</span></div>
+        <div class="stats">frames ${e.n_frames||'?'} · Δ ${e.progress_delta??'?'} · early ${e.early_mean} → late ${e.late_mean}${discStats}</div>`;
+    }
+    btn.onclick=()=>selectEpisode(e.episode_index);
+    list.appendChild(btn);
+  }
+  list.scrollTop = keepScroll;
+}
+
+function highlightSelectedEpisode(){
+  const list=$('ep-list');
+  if(!list) return;
+  list.querySelectorAll('.ep').forEach(btn=>{
+    btn.classList.toggle('selected', Number(btn.dataset.ep)===current);
+  });
+}
+
+async function selectEpisode(epIdx){
+  current=epIdx;
+  highlightSelectedEpisode(); // don't rebuild list (that jumps scroll)
+  // Freeze scrub sync until this episode's video is positioned at frame 0.
+  const syncGen = ++videoSyncGen;
+  const video=$('video');
+  try{ video.pause(); }catch{}
+  video.dataset.syncGen = '-1';
+
+  const res = await (await fetch(`/api/episode?episode_index=${epIdx}&mode=${mode}`)).json();
+  if(syncGen !== videoSyncGen) return; // a newer click superseded this load
+  if(res.error){ $('detail').textContent=res.error; return; }
+  const {meta:em, series, video_url, video_exists, preview_stage_progress_gt} = res;
+  nFrames = series.n_frames || em.n_frames || 0;
+  splits = [...(em.splits || [])];
+  renderSplits();
+
+  $('detail').textContent = mode==='annotate'
+    ? `ep ${epIdx} · ${nFrames} frames · status=${em.status} · splits=[${splits.join(', ')}]`
+    : (em.has_task_index
+        ? `ep ${epIdx} · ${em.n_frames} frames · auto=${em.verdict} · discrete pos ${em.pos_pct}% (μ⁺ ${em.pos_mean_adv??'—'} / μ⁻ ${em.neg_mean_adv??'—'})`
+        : `ep ${epIdx} · ${em.n_frames} frames · auto=${em.verdict} · no task_index`);
+
+  currentSeries = series;
+  currentPreview = preview_stage_progress_gt || null;
+  const scrub=$('scrub'); scrub.max=Math.max(0,nFrames-1); scrub.value=0;
+  updateFrameLabel(0);
+  drawChart(series, preview_stage_progress_gt||[]);
+
+  const armSync = ()=>{
+    if(syncGen !== videoSyncGen) return;
+    suppressSeek=true;
+    try{ video.currentTime=0; }catch{}
+    scrub.value=0;
+    updateFrameLabel(0);
+    if(chart) chart.update('none');
+    video.dataset.syncGen = String(syncGen);
+    suppressSeek=false;
+  };
+
+  if(video_exists && video_url){
+    // Force reload: different datasets share the same relative path (…/episode_000000.mp4).
+    const keyed = `${video_url}?ds=${encodeURIComponent((meta&&meta.dataset_id)||'')}&ep=${epIdx}`;
+    const cur = video.getAttribute('src') || '';
+    if(cur !== keyed){
+      const onReady = ()=>{
+        video.removeEventListener('loadedmetadata', onReady);
+        video.removeEventListener('error', onReady);
+        armSync();
+      };
+      video.addEventListener('loadedmetadata', onReady);
+      video.addEventListener('error', onReady);
+      video.src = keyed;
+      video.load();
+    } else {
+      armSync();
+    }
+  } else {
+    video.removeAttribute('src');
+    video.load();
+    armSync();
+  }
+
+  if(mode==='review'){
+    const rev=loadReview(epIdx)||{mark:'',note:''};
+    $('note').value=rev.note||'';
+  }
+}
+
+function renderSplits(){
+  const box=$('split-list'); box.innerHTML='';
+  if(!splits.length){ box.innerHTML='<span class="hint">尚未设置分界帧</span>'; return; }
+  splits.forEach((s, idx)=>{
+    const chip=document.createElement('span');
+    chip.className='split-chip';
+    chip.innerHTML=`分界${idx+1}: f${s} <button title="删除">×</button>`;
+    chip.querySelector('button').onclick=async ()=>{
+      splits=splits.filter(x=>x!==s);
+      await persistSplits(false);
+      await refreshPreview();
+      renderSplits();
+    };
+    chip.onclick=(ev)=>{ if(ev.target.tagName!=='BUTTON') setCursor(s); };
+    box.appendChild(chip);
+  });
+}
+
+async function addSplitAtCurrent(){
+  if(mode!=='annotate' || current==null) return;
+  const f=Number($('scrub').value);
+  if(f<=0 || f>=nFrames-1){ alert('分界帧不能是第 0 帧或最后一帧'); return; }
+  if(!splits.includes(f)) splits.push(f);
+  splits.sort((a,b)=>a-b);
+  await persistSplits(false);
+  await refreshPreview();
+  renderSplits();
+}
+
+async function clearSplits(){
+  if(current==null) return;
+  if(!confirm('清空该 episode 的分界？')) return;
+  splits=[];
+  await fetch('/api/annotate/clear', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({episode_index:current})});
+  await refreshPreview();
+  renderSplits();
+  await reloadEpisodeListKeepCurrent();
+}
+
+async function persistSplits(written){
+  await fetch('/api/annotate/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({episode_index:current, splits, n_frames:nFrames})
+  });
+  if(!written) await reloadEpisodeListKeepCurrent();
+}
+
+async function refreshPreview(){
+  const res = await (await fetch(`/api/annotate/preview?episode_index=${current}&n_frames=${nFrames}&splits=${splits.join(',')}`)).json();
+  // keep existing series axes, replace preview curve
+  const series = chart ? {
+    frame_index: chart.data.labels,
+    absolute_value: null,
+    absolute_advantage: null,
+    stage_progress_gt: null,
+  } : {frame_index:[...Array(nFrames).keys()]};
+  // reload full episode data for existing GT if any
+  const full = await (await fetch(`/api/episode?episode_index=${current}&mode=annotate`)).json();
+  drawChart(full.series, res.preview||[]);
+}
+
+async function writeParquet(){
+  if(current==null) return;
+  if(!splits.length){ $('detail').textContent='请先设置至少一个分界帧'; return; }
+  $('detail').textContent=`写入中… ep ${current} splits=[${splits.join(', ')}]`;
+  const res = await (await fetch('/api/annotate/write', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({episode_index:current, splits})
+  })).json();
+  if(res.error){ $('detail').textContent=`写入失败: ${res.error}`; return; }
+  meta = await (await fetch('/api/meta')).json();
+  updateHeader();
+  await reloadEpisodeListKeepCurrent();
+  await selectEpisode(current);
+  $('detail').textContent=`已写入 ep ${current} · splits=[${splits.join(', ')}] · bak ok`;
+}
+
+async function deleteCurrentEpisode(){
+  if(current==null) return;
+  const ep = current;
+  const ds = (meta && (meta.dataset_id || meta.dataset)) || '';
+  if(!confirm(`确定从数据集删除 ep ${ep}？\n${ds}\n将删除该 ep，并把后面的 episode 全部前移重编号（不可恢复）`)) return;
+  $('detail').textContent=`删除并重编号中… ep ${ep}（后面 ep 较多时可能要等一会儿）`;
+  const res = await (await fetch('/api/episode/delete', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({episode_index:ep})
+  })).json();
+  if(res.error){ $('detail').textContent=`删除失败: ${res.error}`; return; }
+  meta = res;
+  fillDatasetSelects();
+  updateHeader();
+  const data = await (await fetch('/api/annotate/episodes')).json();
+  episodes = data.episodes || [];
+  current = null; splits=[]; nFrames=0;
+  renderFilters();
+  renderList();
+  if(episodes.length){
+    // after renumber, old ep+1 becomes ep
+    const stay = episodes.find(e=>e.episode_index===ep) || episodes[Math.max(0, episodes.length-1)];
+    await selectEpisode(stay.episode_index);
+  } else {
+    $('detail').textContent='数据集已无 episode';
+    $('video').removeAttribute('src'); $('video').load();
+    if(chart){ chart.destroy(); chart=null; }
+  }
+  $('detail').textContent=`已删除原 ep ${ep} · 前移 ${res.renumbered_count||0} 个 · 剩余 ${meta.n_source}`;
+}
+
+async function reloadEpisodeListKeepCurrent(){
+  const url = mode==='annotate' ? '/api/annotate/episodes' : '/api/episodes';
+  const data = await (await fetch(url)).json();
+  episodes = data.episodes || [];
+  renderList();
+}
+
+function taskIndexSpans(ti){
+  if(!ti || !ti.length) return [];
+  const spans=[];
+  let i=0;
+  while(i<ti.length){
+    const v = Number(ti[i])|0;
+    let j=i+1;
+    while(j<ti.length && (Number(ti[j])|0)===v) j++;
+    spans.push({start:i, end:j-1, value:v});
+    i=j;
+  }
+  return spans;
+}
+
+function drawChart(series, preview){
+  currentSeries = series || currentSeries;
+  currentPreview = preview || null;
+  const ctx=$('chart').getContext('2d');
+  const labels = (series && series.frame_index) || [...Array(nFrames).keys()];
+  if(chart) chart.destroy();
+  const datasets=[];
+  const hasTi = mode==='review' && series && series.task_index && series.task_index.length;
+  if(mode==='review'){
+    if(series.absolute_value) datasets.push({label:'absolute_value', data:series.absolute_value, borderColor:'#5b8def', borderWidth:1.5, pointRadius:0, tension:0.1});
+    if(series.absolute_advantage) datasets.push({label:'absolute_advantage', data:series.absolute_advantage, borderColor:'#3dbe7b', borderWidth:1.2, pointRadius:0, tension:0.1});
+    if(series.relative_advantage) datasets.push({label:'relative_advantage', data:series.relative_advantage, borderColor:'#d4a017', borderWidth:1, pointRadius:0, borderDash:[4,3], tension:0.1});
+    if(hasTi){
+      // 0/1 step on right axis — discrete AWBC label
+      datasets.push({
+        label:'task_index (1=pos)',
+        data:series.task_index.map(v=>Number(v)|0),
+        borderColor:'#9bbcff',
+        backgroundColor:'rgba(155,188,255,.15)',
+        borderWidth:1.5,
+        pointRadius:0,
+        stepped:true,
+        yAxisID:'yTi',
+        order:0,
+      });
+    }
+  } else {
+    if(preview && preview.length) datasets.push({label:'preview stage_progress_gt', data:preview, borderColor:'#b57bff', borderWidth:2, pointRadius:0, tension:0});
+    if(series.stage_progress_gt) datasets.push({label:'saved stage_progress_gt', data:series.stage_progress_gt, borderColor:'#3dbe7b', borderWidth:1.2, pointRadius:0, borderDash:[5,4], tension:0});
+  }
+  const scales = {
+    x:{ ticks:{color:'#8b95a8', maxTicksLimit:10}, grid:{color:'rgba(255,255,255,.04)'}, title:{display:true, text:'frame', color:'#8b95a8'} },
+    y:{ ticks:{color:'#8b95a8'}, grid:{color:'rgba(255,255,255,.06)'}, suggestedMin: mode==='annotate'?0:-1, suggestedMax:1 }
+  };
+  if(hasTi){
+    scales.yTi = {
+      position:'right', min:-0.05, max:1.05,
+      ticks:{color:'#9bbcff', stepSize:1, callback:(v)=> (v===0||v===1)? String(v):''},
+      grid:{drawOnChartArea:false},
+      title:{display:true, text:'task_index', color:'#9bbcff', font:{size:10}}
+    };
+  }
+  chart = new Chart(ctx, {
+    type:'line',
+    data:{labels, datasets},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{ legend:{labels:{color:'#c5cede', boxWidth:12, font:{size:11}}} },
+      scales,
+      onClick(evt){
+        if(mode!=='annotate') return;
+        const pts = chart.getElementsAtEventForMode(evt, 'index', {intersect:false}, true);
+      }
+    },
+    plugins:[{
+      id:'cursors',
+      beforeDatasetsDraw(c){
+        if(mode!=='review' || !hasTi) return;
+        const xScale=c.scales.x, yScale=c.scales.y, ctx=c.ctx;
+        const spans = taskIndexSpans(series.task_index);
+        ctx.save();
+        for(const sp of spans){
+          const x0 = xScale.getPixelForValue(sp.start);
+          const x1 = xScale.getPixelForValue(sp.end);
+          const left = Math.min(x0,x1);
+          const width = Math.max(1, Math.abs(x1-x0) + (xScale.getPixelForValue(1)-xScale.getPixelForValue(0)||0)*0.5);
+          ctx.fillStyle = sp.value===1 ? 'rgba(61,190,123,.16)' : 'rgba(226,92,92,.08)';
+          ctx.fillRect(left, yScale.top, width, yScale.bottom - yScale.top);
+        }
+        ctx.restore();
+      },
+      afterDraw(c){
+        const xScale=c.scales.x, yScale=c.scales.y, ctx=c.ctx;
+        const frame=Number($('scrub').value);
+        const x=xScale.getPixelForValue(frame);
+        ctx.save();
+        ctx.strokeStyle='#ff6b6b'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(x,yScale.top); ctx.lineTo(x,yScale.bottom); ctx.stroke();
+        if(mode==='annotate'){
+          for(const s of splits){
+            const xs=xScale.getPixelForValue(s);
+            ctx.strokeStyle='#b57bff'; ctx.setLineDash([4,3]);
+            ctx.beginPath(); ctx.moveTo(xs,yScale.top); ctx.lineTo(xs,yScale.bottom); ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
+        ctx.restore();
+      }
+    }]
+  });
+}
+
+function fmtVal(x){
+  if(x==null || Number.isNaN(Number(x))) return '—';
+  return Number(x).toFixed(4);
+}
+function atFrame(arr, frame){
+  if(!arr || !arr.length) return null;
+  const i=Math.max(0, Math.min(arr.length-1, frame|0));
+  return arr[i];
+}
+function updateValueReadout(frame){
+  const box=$('value-readout');
+  if(!box) return;
+  const f=frame|0;
+  if(mode==='review'){
+    const s=currentSeries||{};
+    const ti = atFrame(s.task_index, f);
+    let discHtml;
+    if(ti==null || Number.isNaN(Number(ti))){
+      discHtml = `<span class="c-disc-miss">task_index <span class="v">—</span></span>`;
+    } else if((Number(ti)|0)===1){
+      discHtml = `<span class="c-disc-pos">AWBC <span class="v">positive</span> (task_index=1)</span>`;
+    } else {
+      discHtml = `<span class="c-disc-neg">AWBC <span class="v">negative</span> (task_index=0)</span>`;
+    }
+    box.innerHTML =
+      discHtml +
+      `<span class="c-abs">absolute_value <span class="v">${fmtVal(atFrame(s.absolute_value,f))}</span></span>`+
+      `<span class="c-aadv">absolute_advantage <span class="v">${fmtVal(atFrame(s.absolute_advantage,f))}</span></span>`+
+      `<span class="c-radv">relative_advantage <span class="v">${fmtVal(atFrame(s.relative_advantage,f))}</span></span>`;
+  } else {
+    const s=currentSeries||{};
+    box.innerHTML =
+      `<span class="c-stage">preview stage_gt <span class="v">${fmtVal(atFrame(currentPreview,f))}</span></span>`+
+      `<span class="c-aadv">saved stage_gt <span class="v">${fmtVal(atFrame(s.stage_progress_gt,f))}</span></span>`;
+  }
+}
+function updateFrameLabel(frame){
+  $('frame-label').textContent=`frame ${frame}`;
+  $('time-label').textContent=`${(frame/fps).toFixed(2)}s`;
+  updateValueReadout(frame);
+}
+function setCursor(frame){
+  suppressSeek=true;
+  $('scrub').value=frame;
+  updateFrameLabel(frame);
+  if(chart) chart.update('none');
+  const video=$('video');
+  if(video.src){
+    const t=frame/fps;
+    if(Math.abs(video.currentTime-t)>1/fps) video.currentTime=t;
+  }
+  suppressSeek=false;
+}
+function shiftEpisode(delta){
+  const list=filtered(); if(!list.length) return;
+  const idx=list.findIndex(e=>e.episode_index===current);
+  const next=list[Math.min(list.length-1, Math.max(0,(idx<0?0:idx)+delta))];
+  selectEpisode(next.episode_index);
+}
+
+init();
+setInterval(async ()=>{
+  try{
+    const m=await (await fetch('/api/meta')).json();
+    meta=m; updateHeader();
+    if(mode==='annotate'){
+      const data=await (await fetch('/api/annotate/episodes')).json();
+      if((data.episodes||[]).length !== episodes.length){ episodes=data.episodes||[]; renderList(); }
+    }
+  }catch{}
+}, 20000);
+</script>
+</body>
+</html>

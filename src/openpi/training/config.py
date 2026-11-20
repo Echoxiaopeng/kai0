@@ -1410,10 +1410,11 @@ _CONFIGS = [
             discrete_state_input=False,
         ),
         data=LerobotAgilexDataConfig(
-            repo_id = "Path/to/your/advantage/dataset",
+            # 补训：自标 stage_progress_gt 的 FlattenFold/base（306 eps）
+            repo_id="/data3/kian_workspace/RLinf/FlattenFold/base",
             assets=AssetsConfig(
-                assets_dir="Path/to/your/advantage/dataset/assets",
-                asset_id="Your_advantage_dataset_name",
+                assets_dir="/data3/kian_workspace/RLinf/FlattenFold/base",
+                asset_id="base",
             ),
             default_prompt="Flatten and fold the cloth.",
             # * why removing "prompt" here will lead to an error in transforms.py
@@ -1444,12 +1445,14 @@ _CONFIGS = [
             ]
             )
         ),
-        pytorch_weight_path="Path/to/your/pi05_base/checkpoint",
-        num_train_steps=100_000,
-        keep_period=10000,
-        save_interval=10000,
+        # 从官方 Task_A 训好的 30k Estimator 权重继续补训（新 exp，非 --resume）
+        pytorch_weight_path="/data3/kian_workspace/kai0/checkpoints/ADVANTAGE_TORCH_KAI0_FLATTEN_FOLD/task_a_adv_2gpu/30000",
+        num_train_steps=20_000,
+        keep_period=5000,
+        save_interval=5000,
         num_workers=8,
-        batch_size=16,  # * 1 gpus
+        # batch_size=16,  # * 1 gpu
+        batch_size=32,  # * 2 GPUs (16 per GPU)
         # batch_size=128, # * 8 gpus
         skip_norm_stats=True,           # *  No norm stats used.
     ),
@@ -1521,6 +1524,61 @@ _CONFIGS = [
         keep_period=5000,
         num_workers=8, 
         batch_size=256, 
+    ),
+    # 5x KAI0_10000_clean *_awbc; continue from mix1110…/10000 via weight_loader (not --resume).
+    TrainConfig(
+        name="pi05_flatten_fold_awbc_clean_mix",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LerobotAgilexDataConfig(
+            # repo_id / assets: fold-policy norm from cont_dagger lineage (matches mix1110 continue).
+            repo_id="/data3/kian_workspace/kai0/checkpoints/my_fold_cont_dagger",
+            assets=AssetsConfig(
+                assets_dir="/data3/kian_workspace/kai0/checkpoints",
+                asset_id="my_fold_cont_dagger",
+            ),
+            default_prompt="Flatten and fold the cloth.",
+            use_delta_joint_actions=False,
+            base_config=DataConfig(prompt_from_task=True),
+            mixtures=(
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/RLinf/FlattenFold/flatten_fold_clothes_base_lerobot_adv_KAI0_10000_clean_awbc",
+                    weight=1.0,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/RLinf/FlattenFold/flatten_fold_clothes_bw_1116_lerobot__adv_KAI0_10000_clean_awbc",
+                    weight=1.0,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/RLinf/FlattenFold/kai0_dagger_human_clothes_1106_lerobot_adv_KAI0_10000_clean_awbc",
+                    weight=1.0,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/RLinf/FlattenFold/kai0_dagger_human_clothes_b_1117_lerobot__adv_KAI0_10000_clean_awbc",
+                    weight=1.0,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/RLinf/FlattenFold/kai0_dagger_human_clothes_mix1110_lerobot_adv_KAI0_10000_clean_awbc",
+                    weight=1.0,
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data3/kian_workspace/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger40_bw1116_d1117/10000/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-6,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        num_train_steps=30_000,
+        save_interval=2500,
+        keep_period=5_000,
+        num_workers=8,
+        # 64 OOM'd on 2xA100-80G (NCCL); 32 fits with fsdp_devices=2.
+        batch_size=32,
+        fsdp_devices=2,
+        wandb_enabled=True,
     ),
     #**************************TeeShirtSort AWBC*******************************
     TrainConfig(
