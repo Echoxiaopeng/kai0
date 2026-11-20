@@ -239,3 +239,14 @@ experiment/**/*.webm
 experiment/**/*.npz.0
 experiment/**/*.npz.index
 experiment/**/*.npz.data-*
+
+# Experiment scratch / debug dumps (status, probes, api caches, one-off scripts)
+experiment/**/log/_*
+experiment/**/log/api_*.json
+experiment/**/log/*.txt
+experiment/**/log/*.json
+experiment/**/*_DONE.txt
+experiment/**/*_pid.txt
+experiment/**/*_status.txt
+experiment/**/*_done.txt
+experiment/**/*.oom_attempt*
