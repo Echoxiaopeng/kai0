@@ -1580,6 +1580,63 @@ _CONFIGS = [
         fsdp_devices=2,
         wandb_enabled=True,
     ),
+    # FlattenFoldClothes short-horizon MEM (visual + proprio); continue from mix1110…/10000.
+    # Mix: flatten 60% (53+7) / dagger 40% (18+13+9); fps=20 → memory_stride=20.
+    TrainConfig(
+        name="pi05_flatten_fold_clothes_mem",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            use_visual_memory=True,
+            use_proprioceptive_memory=True,
+            memory_frames=6,
+            memory_stride=20,
+        ),
+        data=LerobotAgilexDataConfig(
+            repo_id="/data3/kian_workspace/kai0/checkpoints/my_fold_cont_dagger",
+            assets=AssetsConfig(
+                assets_dir="/data3/kian_workspace/kai0/checkpoints",
+                asset_id="my_fold_cont_dagger",
+            ),
+            default_prompt="Flatten and fold the cloth.",
+            use_delta_joint_actions=False,
+            base_config=DataConfig(prompt_from_task=True),
+            mixtures=(
+                # flatten 60
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/kai0/data/FlattenFoldClothes/flatten_fold_clothes_base_lerobot",
+                    weight=53,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/kai0/data/FlattenFoldClothes/flatten_fold_clothes_bw_1116_lerobot",
+                    weight=7,
+                ),
+                # dagger 40
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/kai0/data/FlattenFoldClothes/kai0_dagger_human_clothes_1106_lerobot",
+                    weight=18,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/kai0/data/FlattenFoldClothes/kai0_dagger_human_clothes_1110_lerobot",
+                    weight=13,
+                ),
+                LeRobotMixture(
+                    repo_id="/data3/kian_workspace/kai0/data/FlattenFoldClothes/kai0_dagger_human_clothes_b_1117_lerobot",
+                    weight=9,
+                ),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data3/kian_workspace/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger40_bw1116_d1117/10000/params"
+        ),
+        num_train_steps=100_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=8,
+        # MEM (6-frame space-time attn): 128 and 64 OOM'd on 2xA100-80G; using 8.
+        batch_size=8,
+        fsdp_devices=2,
+        wandb_enabled=True,
+    ),
     #**************************TeeShirtSort AWBC*******************************
     TrainConfig(
         name="pi05_tee_shirt_sort_awbc",
