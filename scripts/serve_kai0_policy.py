@@ -13,6 +13,17 @@ RTC (real-time chunking) — same JAX checkpoint, Pi0RTC model class:
       --checkpoint /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_normal_10_26/10000 \
       --rtc --port 8000
 
+## 平台训练的模型起这个脚本。
+cd /media/lenovo/data/kian/kai0
+uv run scripts/serve_kai0_policy_state_pad32.py \
+  --checkpoint /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger10_platform/9999 \
+  --rtc --port 8000
+
+## 这是使用这个AWBC的服务
+uv run scripts/serve_kai0_policy.py \
+    --checkpoint /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_awbc_clean_mix/awbc_clean_from_mix1110_10k/20000 \
+    --rtc --port 8000 \
+    --default-prompt "fold the cloth, Advantage: positive"
 
 
 ## 测试日志
@@ -30,6 +41,31 @@ checkpoint:
 # 2026/11/10测试日志
 /media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix_human_low/5000
 效果：有些情况比较犹豫
+
+# 2026/11/12测试日志
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110/15000
+效果：针对有些特殊情况，机械臂会停顿较久。
+
+# 2026/11/13测试日志
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25/10000
+效果：摆平叠的成功率是9/10，一团叠7/10 
+
+
+# 2026/11/16测试日志
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger20/my_fold_replay25_dagger20/22500
+效果：没有变差
+
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger40/my_fold_replay25_dagger40/10000
+效果： 目前最好，针对竖着的情况依旧可以恢复。
+
+
+# 2026/11/18测试日志
+/media/lenovo/data/kian/kai0/checkpoints/pi05_flatten_fold_mix1110_replay25_dagger40_bw1116_d1117/my_fold_bw1116_d1117/10000
+效果： 加入了蓝色衣服
+成功率：铺平叠 5/5 一团叠 9/10
+
+
+
 """
 
 from __future__ import annotations
